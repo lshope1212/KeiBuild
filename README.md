@@ -41,9 +41,13 @@ The console prints the path to a review-ready `candidates.json`. Use the [data p
 | `KeiBuild.Catalog/` | Fitment and source records, import validation, JSON serialization, and duplicate comparison shared by the web and console apps. |
 | `KeiBuild.Ingestion/` | Console app for single-document collection, normalization, extraction, validation, and export. |
 | `KeiBuild.Ingestion.Tests/` | xUnit coverage for collection policy, grounding, validation, and the offline review workflow. |
+| `KeiBuild.Research/` | Independent PostgreSQL research console for HA4 campaigns, discovery, sourced technical claims, and reviewed exports. |
+| `KeiBuild.Research.Tests/` | Research unit tests and opt-in PostgreSQL integration tests using synthetic providers. |
 | `KeiBuild/Data/catalog.json` | Starter chassis and fitment claims with source locators. |
 
 The app uses .NET 10 and static server rendering. Search is an ordinary GET request with a shareable URL, and the review page submits standard POST forms. Blazor’s per-page Interactive Server mode can be added when a feature needs live state, such as comparing options in a build planner. [Microsoft’s Blazor render modes](https://learn.microsoft.com/en-us/aspnet/core/blazor/components/render-modes?view=aspnetcore-10.0)
+
+The [research guide](docs/research.md) covers the PostgreSQL setup, credential-free HA4 campaign, bounded live discovery, and reviewed fitment exports.
 
 <details>
 <summary>Hero image provenance</summary>

@@ -6,7 +6,7 @@ using KeiBuild.Ingestion.Sources;
 
 namespace KeiBuild.Ingestion.Parsing;
 
-public sealed record NormalizedDocument(IReadOnlyList<string> Lines);
+public sealed record NormalizedDocument(IReadOnlyList<string> Lines, string? Language = null);
 
 public static class DocumentNormalizer
 {
@@ -23,14 +23,15 @@ public static class DocumentNormalizer
     {
         var text = DocumentBytes.Decode(document.Bytes, document.Charset);
         var output = new LineBuffer();
+        string? language = null;
         if (format == DocumentFormat.Html)
-            HtmlLines(text, output);
+            language = HtmlLines(text, output);
         else
             TextLines(text, format, output);
 
         if (output.Lines.Count == 0)
             throw new IngestionException("The document has no extractable text.");
-        return new NormalizedDocument(output.Lines);
+        return new NormalizedDocument(output.Lines, language);
     }
 
     private static void TextLines(string text, DocumentFormat format, LineBuffer output)
@@ -68,7 +69,7 @@ public static class DocumentNormalizer
             ? line[1..^1].Split('|', StringSplitOptions.TrimEntries)
             : [];
 
-    private static void HtmlLines(string text, LineBuffer output)
+    private static string? HtmlLines(string text, LineBuffer output)
     {
         // The default parser has no browsing context or resource loader.
         var document = new HtmlParser().ParseDocument(text);
@@ -76,7 +77,7 @@ public static class DocumentNormalizer
             element.Remove();
 
         if (document.Body is null)
-            return;
+            return null;
 
         var pending = new StringBuilder();
         var nodes = new Stack<(INode Node, bool End)>();
@@ -113,6 +114,9 @@ public static class DocumentNormalizer
             }
         }
         Flush(pending, output);
+        var language = document.DocumentElement?.GetAttribute("lang")?.Trim();
+        return language is { Length: > 0 and <= 40 } && language.All(character => char.IsAsciiLetterOrDigit(character) || character == '-')
+            ? language : null;
     }
 
     private static string TableRow(IElement row, Dictionary<IElement, string[]> tableHeaders)

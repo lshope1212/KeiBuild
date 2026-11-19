@@ -22,15 +22,15 @@ public static class DocumentBytes
         return await ReadAsync(stream, ct);
     }
 
-    public static async Task<byte[]> ReadAsync(Stream stream, CancellationToken ct)
+    public static async Task<byte[]> ReadAsync(Stream stream, CancellationToken ct, int maximumBytes = MaxBytes)
     {
         using var result = new MemoryStream();
         var buffer = new byte[8192];
         int read;
         while ((read = await stream.ReadAsync(buffer, ct)) > 0)
         {
-            if (result.Length + read > MaxBytes)
-                throw SizeError();
+            if (result.Length + read > maximumBytes)
+                throw SizeError(maximumBytes);
             result.Write(buffer, 0, read);
         }
         return result.ToArray();
@@ -71,5 +71,7 @@ public static class DocumentBytes
         return new CollectedDocument(await ReadFileAsync(path, ct), DateTimeOffset.UtcNow);
     }
 
-    public static IngestionException SizeError() => new("The document exceeds the 512 KiB size limit.");
+    public static IngestionException SizeError(int maximumBytes = MaxBytes) => maximumBytes == MaxBytes
+        ? new("The document exceeds the 512 KiB size limit.")
+        : new($"The document exceeds the configured {maximumBytes}-byte size limit.");
 }

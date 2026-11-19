@@ -1,0 +1,36 @@
+[
+  {
+    "key": "example-single-page",
+    "scope": "https://publisher.example/ha4/example-page",
+    "prefix": false,
+    "publisher": "Example publisher",
+    "kind": "Manufacturer",
+    "format": "Html",
+    "permissionNotes": "Placeholder. Replace with the applicable access, AI processing, and evidence reuse terms after verifying permission.",
+    "allowFetch": false,
+    "allowAi": false,
+    "allowEvidence": false,
+    "allowSnapshot": false,
+    "exploreLinks": false,
+    "delaySeconds": 10,
+    "language": "ja",
+    "sitemapUrl": null
+  },
+  {
+    "key": "example-approved-section",
+    "scope": "https://publisher.example/ha4/catalog/",
+    "prefix": true,
+    "publisher": "Example catalog publisher",
+    "kind": "Vendor",
+    "format": "Html",
+    "permissionNotes": "Placeholder for a documented path-level permission and permission to read the exact sitemap URL.",
+    "allowFetch": false,
+    "allowAi": false,
+    "allowEvidence": false,
+    "allowSnapshot": false,
+    "exploreLinks": false,
+    "delaySeconds": 30,
+    "language": "en",
+    "sitemapUrl": "https://publisher.example/ha4/sitemap.xml"
+  }
+]

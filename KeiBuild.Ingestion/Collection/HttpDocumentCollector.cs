@@ -7,9 +7,11 @@ using KeiBuild.Ingestion.Sources;
 
 namespace KeiBuild.Ingestion.Collection;
 
+public sealed record HttpCollectionOptions(int MaximumDocumentBytes = DocumentBytes.MaxBytes,
+    int OriginDelaySeconds = 10, bool Sitemap = false);
+
 public sealed class HttpDocumentCollector(HttpClient client, string stateDirectory)
 {
-    private static readonly TimeSpan OriginCooldown = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(20);
 
     public static HttpClient CreateClient() => new(new SocketsHttpHandler
@@ -22,34 +24,47 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
         AutomaticDecompression = DecompressionMethods.All
     });
 
-    public async Task<CollectedDocument> CollectAsync(SourceDefinition source, CancellationToken ct)
+    public Task<CollectedDocument> CollectAsync(SourceDefinition source, CancellationToken ct) =>
+        CollectAsync(source, new HttpCollectionOptions(), ct);
+
+    public async Task<CollectedDocument> CollectAsync(SourceDefinition source, HttpCollectionOptions options, CancellationToken ct)
     {
+        if (options.MaximumDocumentBytes is < 1 or > DocumentBytes.MaxBytes || options.OriginDelaySeconds is < 10 or > 300)
+            throw new ArgumentOutOfRangeException(nameof(options));
         var uri = source.Validate();
         if (!source.AutomatedRetrievalApproved)
             throw new IngestionException("Automated retrieval is not approved in the source registry. Use a permitted local file.");
         ValidatePublicUrl(uri);
 
         using var rateFile = LockOrigin(uri.IdnHost);
-        var cooldown = OriginCooldown;
+        var cooldown = TimeSpan.FromSeconds(options.OriginDelaySeconds);
+        DateTimeOffset? retryAt = null;
         RecordNextAllowed(rateFile, DateTimeOffset.UtcNow + cooldown);
         try
         {
             var robotsUrl = new Uri(uri.GetLeftPart(UriPartial.Authority) + "/robots.txt");
-            var robots = await DownloadAsync(robotsUrl, format: null, ct);
+            var robots = await DownloadAsync(robotsUrl, format: null, new HttpCollectionOptions(), ct);
             var delay = robots is null ? TimeSpan.FromSeconds(1) :
                 RobotsRules.Check(DocumentBytes.Decode(robots.Bytes, robots.Charset), uri);
             if (delay > cooldown)
                 cooldown = delay;
             await Task.Delay(delay, ct);
-            return (await DownloadAsync(uri, source.Format, ct))!;
+            return (await DownloadAsync(uri, source.Format, options, ct))!;
+        }
+        catch (IngestionException error)
+        {
+            retryAt = error.RetryAt;
+            throw;
         }
         finally
         {
-            RecordNextAllowed(rateFile, DateTimeOffset.UtcNow + cooldown);
+            var next = DateTimeOffset.UtcNow + cooldown;
+            RecordNextAllowed(rateFile, retryAt is { } later && later > next ? later : next);
         }
     }
 
-    private async Task<CollectedDocument?> DownloadAsync(Uri url, DocumentFormat? format, CancellationToken ct)
+    private async Task<CollectedDocument?> DownloadAsync(Uri url, DocumentFormat? format,
+        HttpCollectionOptions options, CancellationToken ct)
     {
         var resource = format is null ? "robots.txt" : "source document";
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -62,25 +77,38 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
             if (format is null && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
                 return null;
             if (response.StatusCode != HttpStatusCode.OK)
-                throw new IngestionException($"The {resource} returned HTTP {(int)response.StatusCode}. Use a permitted local document or update the approved URL after checking the source.");
+            {
+                var status = (int)response.StatusCode;
+                var retry = response.Headers.RetryAfter;
+                throw new IngestionException($"The {resource} returned HTTP {status}. Use a permitted local document or update the approved URL after checking the source.")
+                {
+                    HttpStatus = status,
+                    IsTransient = status is 408 or 429 or >= 500,
+                    RetryAt = retry?.Date ?? (retry?.Delta is { } delta ? DateTimeOffset.UtcNow + delta : null)
+                };
+            }
 
             var header = response.Content.Headers.ContentType;
-            if (!MatchesFormat(header?.MediaType?.ToLowerInvariant(), format))
+            var mediaType = header?.MediaType?.ToLowerInvariant();
+            if (options.Sitemap ? mediaType is not ("text/xml" or "application/xml") : !MatchesFormat(mediaType, format))
                 throw new IngestionException($"The {resource} returned an unexpected content type.");
-            if (response.Content.Headers.ContentLength > DocumentBytes.MaxBytes)
-                throw DocumentBytes.SizeError();
+            if (response.Content.Headers.ContentLength > options.MaximumDocumentBytes)
+                throw DocumentBytes.SizeError(options.MaximumDocumentBytes);
 
             await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
-            var bytes = await DocumentBytes.ReadAsync(stream, deadline.Token);
+            var bytes = await DocumentBytes.ReadAsync(stream, deadline.Token, options.MaximumDocumentBytes);
             return new CollectedDocument(bytes, DateTimeOffset.UtcNow, header?.CharSet, RetrievedFromUrl: true);
         }
         catch (OperationCanceledException error) when (!ct.IsCancellationRequested)
         {
-            throw new IngestionException($"Timed out retrieving the {resource}.", error);
+            throw new IngestionException($"Timed out retrieving the {resource}.", error) { IsTransient = true };
         }
         catch (HttpRequestException error)
         {
-            throw new IngestionException($"Could not retrieve the {resource} over public HTTPS. Check the approved URL and network.", error);
+            throw new IngestionException($"Could not retrieve the {resource} over public HTTPS. Check the approved URL and network.", error)
+            {
+                IsTransient = true
+            };
         }
     }
 
@@ -150,7 +178,10 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
         }
         catch (IOException error)
         {
-            throw new IngestionException("Could not lock the origin's retrieval state. Another collection may be running.", error);
+            throw new IngestionException("Could not lock the origin's retrieval state. Another collection may be running.", error)
+            {
+                IsTransient = true
+            };
         }
 
         try
@@ -164,7 +195,11 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
                         DateTimeStyles.None, out var nextAllowed))
                     throw new IngestionException("The origin's retrieval state is invalid.");
                 if (DateTimeOffset.UtcNow < nextAllowed)
-                    throw new IngestionException($"The origin is in its retrieval cooldown. Retry after {nextAllowed:O}.");
+                    throw new IngestionException($"The origin is in its retrieval cooldown. Retry after {nextAllowed:O}.")
+                    {
+                        IsTransient = true,
+                        RetryAt = nextAllowed
+                    };
             }
             return stream;
         }

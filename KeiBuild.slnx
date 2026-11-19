@@ -3,4 +3,6 @@
   <Project Path="KeiBuild.Catalog/KeiBuild.Catalog.csproj" />
   <Project Path="KeiBuild.Ingestion/KeiBuild.Ingestion.csproj" />
   <Project Path="KeiBuild.Ingestion.Tests/KeiBuild.Ingestion.Tests.csproj" />
+  <Project Path="KeiBuild.Research/KeiBuild.Research.csproj" />
+  <Project Path="KeiBuild.Research.Tests/KeiBuild.Research.Tests.csproj" />
 </Solution>

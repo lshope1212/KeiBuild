@@ -1,0 +1,18 @@
+services:
+  research-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: keibuild
+      POSTGRES_USER: keibuild
+      POSTGRES_PASSWORD: "${KEIBUILD_POSTGRES_PASSWORD:?Set KEIBUILD_POSTGRES_PASSWORD}"
+    ports:
+      - "127.0.0.1:5444:5432"
+    volumes:
+      - kei-research-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "keibuild", "-d", "keibuild"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  kei-research-data:
