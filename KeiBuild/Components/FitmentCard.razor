@@ -1,0 +1,28 @@
+<article class="fitment-card">
+    <div class="fitment-header">
+        <span class="eyebrow">@Entry.Kind · @Entry.Category</span>
+        @if (ShowChassis)
+        {
+            <a class="chassis-tag" href="@($"/chassis/{Entry.ChassisCode}")">@Entry.ChassisCode</a>
+        }
+    </div>
+    <h3>@Entry.Title</h3>
+    <p class="part-maker">
+        @Entry.Manufacturer
+        @if (Entry.PartNumber is { } partNumber)
+        {
+            <code>@partNumber</code>
+        }
+    </p>
+    @if (Entry.OemReference is { } oem)
+    {
+        <p class="oem-reference">OEM cross-reference <code>@oem</code></p>
+    }
+    <p class="fitment-conditions">@Entry.Conditions</p>
+    <SourceDetails Source="Entry.Source" />
+</article>
+
+@code {
+    [Parameter, EditorRequired] public FitmentEntry Entry { get; set; } = default!;
+    [Parameter] public bool ShowChassis { get; set; }
+}

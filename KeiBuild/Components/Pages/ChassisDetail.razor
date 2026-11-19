@@ -1,0 +1,62 @@
+@page "/chassis/{Code}"
+@inject CatalogStore Catalog
+@inject NavigationManager Navigation
+
+@if (Truck is not null)
+{
+    <PageTitle>@Truck.Code @Truck.Name | KeiBuild</PageTitle>
+    <a class="back-link" href="/#chassis-index">All chassis</a>
+    <section class="page-intro detail-intro">
+        <p class="eyebrow">@Truck.Name</p>
+        <h1 class="detail-code">@Truck.Code</h1>
+        <p>@Truck.Summary</p>
+        <dl class="spec-grid">
+            <div><dt>Drive</dt><dd>@Truck.Drive</dd></div>
+            <div><dt>Engine</dt><dd>@Truck.Engine</dd></div>
+            <div><dt>Introduced</dt><dd>@Truck.Introduced</dd></div>
+        </dl>
+        <SourceDetails Source="Truck.Source" />
+    </section>
+
+    <section class="detail-section" aria-labelledby="fitment-title">
+        <div class="section-heading">
+            <div>
+                <h2 id="fitment-title">Parts &amp; modifications</h2>
+                <p>Check the fitment conditions against your truck’s configuration.</p>
+            </div>
+        </div>
+        @if (Entries.Length == 0)
+        {
+            <p class="empty-state">There are no reviewed listings for this chassis yet.</p>
+        }
+        else
+        {
+            <div class="fitment-grid">
+                @foreach (var entry in Entries)
+                {
+                    <FitmentCard Entry="entry" />
+                }
+            </div>
+        }
+    </section>
+}
+
+@code {
+    [Parameter] public string? Code { get; set; }
+
+    private Chassis? Truck { get; set; }
+    private FitmentEntry[] Entries { get; set; } = [];
+
+    protected override void OnParametersSet()
+    {
+        Truck = Catalog.FindChassis(Code);
+        if (Truck is null)
+        {
+            Navigation.NotFound();
+            return;
+        }
+
+        Entries = Catalog.PublishedEntries().Where(entry => entry.ChassisCode == Truck.Code)
+            .OrderBy(entry => entry.Kind).ThenBy(entry => entry.Title).ToArray();
+    }
+}

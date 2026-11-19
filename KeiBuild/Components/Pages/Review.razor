@@ -1,0 +1,168 @@
+@page "/review"
+@inject CatalogStore Catalog
+@inject IWebHostEnvironment HostEnvironment
+@inject NavigationManager Navigation
+@inject ILogger<Review> Logger
+
+@if (HostEnvironment.IsDevelopment())
+{
+    <PageTitle>Review inbox | KeiBuild</PageTitle>
+    <section class="page-intro">
+        <h1>Review inbox</h1>
+        <p>Import candidate listings, check their evidence, and decide what appears in the local catalog.</p>
+    </section>
+
+    @if (ErrorMessage is not null)
+    {
+        <p class="notice error-notice" role="alert">@ErrorMessage</p>
+    }
+    @if (Added is >= 0 && Duplicates is >= 0)
+    {
+        <p class="notice" role="status">@Added queued. @Duplicates duplicate(s) skipped.</p>
+    }
+    @if (DecisionResult is "approved" or "rejected")
+    {
+        <p class="notice" role="status">Listing @DecisionResult.</p>
+    }
+
+    <div class="review-grid">
+        <section class="review-panel" aria-labelledby="import-title">
+            <h2 id="import-title">Import candidates</h2>
+            <form method="post" @formname="import" @onsubmit="Import">
+                <AntiforgeryToken />
+                <label for="payload">JSON batch</label>
+                <p id="import-help" class="muted">Paste an array of 1–50 entries using the example in the project’s <code>docs</code> folder.</p>
+                <textarea id="payload" name="payload" rows="11" aria-describedby="import-help"
+                          maxlength="@CatalogStore.MaxImportCharacters" required placeholder="[ … ]">@Payload</textarea>
+                <button type="submit" class="button primary">Queue for review</button>
+            </form>
+        </section>
+
+        <section aria-labelledby="pending-title">
+            <div class="queue-heading">
+                <h2 id="pending-title">Pending review</h2>
+                <span class="chassis-tag">@Pending.Length</span>
+            </div>
+            @if (Pending.Length == 0)
+            {
+                <p class="empty-state">The inbox is empty.</p>
+            }
+            else
+            {
+                <form method="post" @formname="decision" @onsubmit="Decide" class="review-list">
+                    <AntiforgeryToken />
+                    @foreach (var item in Pending)
+                    {
+                        <div class="review-item">
+                            <FitmentCard Entry="item.Entry" ShowChassis="true" />
+                            <div class="review-actions" role="group" aria-label="@($"Review {item.Entry.Title} for {item.Entry.ChassisCode}")">
+                                <button class="button primary" name="selection" value="@($"approve:{item.Id:N}")" type="submit">Approve</button>
+                                <button class="button secondary" name="selection" value="@($"reject:{item.Id:N}")" type="submit">Reject</button>
+                            </div>
+                        </div>
+                    }
+                </form>
+            }
+            @if (Reviewed.Length > 0)
+            {
+                <section class="review-history" aria-labelledby="history-title">
+                    <h2 id="history-title">Decisions</h2>
+                    <ul>
+                        @foreach (var item in Reviewed)
+                        {
+                            <li><span>@item.Entry.ChassisCode · @item.Entry.Title @item.Entry.PartNumber</span><strong>@item.Status</strong></li>
+                        }
+                    </ul>
+                </section>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    [SupplyParameterFromForm(Name = "payload", FormName = "import")]
+    private string? Payload { get; set; }
+
+    [SupplyParameterFromForm(Name = "selection", FormName = "decision")]
+    private string? Selection { get; set; }
+
+    [SupplyParameterFromQuery] private int? Added { get; set; }
+    [SupplyParameterFromQuery] private int? Duplicates { get; set; }
+    [SupplyParameterFromQuery] private string? DecisionResult { get; set; }
+
+    private string? ErrorMessage { get; set; }
+    private ReviewItem[] Pending { get; set; } = [];
+    private ReviewItem[] Reviewed { get; set; } = [];
+
+    protected override void OnParametersSet()
+    {
+        if (HostEnvironment.IsDevelopment())
+            LoadInbox();
+        else
+            Navigation.NotFound();
+    }
+
+    private void LoadInbox()
+    {
+        var items = Catalog.ReviewItems();
+        Pending = items.Where(item => item.Status == ReviewStatus.Pending).ToArray();
+        Reviewed = items.Where(item => item.Status != ReviewStatus.Pending)
+            .OrderByDescending(item => item.ReviewedAt).ToArray();
+    }
+
+    private void Import()
+    {
+        try
+        {
+            var (added, duplicates) = Catalog.Import(Payload);
+            Navigation.NavigateTo($"/review?added={added}&duplicates={duplicates}");
+        }
+        catch (CatalogImportException exception)
+        {
+            ErrorMessage = exception.Message;
+        }
+        catch (IOException exception)
+        {
+            ReportSaveFailure(exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            ReportSaveFailure(exception);
+        }
+    }
+
+    private void Decide()
+    {
+        var selected = Selection?.Split(':', 2);
+        if (selected is not [("approve" or "reject"), var idValue] || !Guid.TryParseExact(idValue, "N", out var id))
+        {
+            ErrorMessage = "Choose an approval or rejection for a listing.";
+            return;
+        }
+
+        var status = selected[0] == "approve" ? ReviewStatus.Approved : ReviewStatus.Rejected;
+        try
+        {
+            if (Catalog.Review(id, status))
+                Navigation.NavigateTo($"/review?decisionResult={status.ToString().ToLowerInvariant()}");
+            else
+                ErrorMessage = "This listing is no longer pending.";
+
+            LoadInbox();
+        }
+        catch (IOException exception)
+        {
+            ReportSaveFailure(exception);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            ReportSaveFailure(exception);
+        }
+    }
+
+    private void ReportSaveFailure(Exception exception)
+    {
+        Logger.LogError(exception, "Could not save the review inbox.");
+        ErrorMessage = "The review inbox could not be saved. Check the application logs and retry.";
+    }
+}

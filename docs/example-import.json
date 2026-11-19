@@ -1,0 +1,19 @@
+[
+  {
+    "chassisCode": "DD51T",
+    "kind": "Part",
+    "title": "Radiator cap",
+    "manufacturer": "NTK",
+    "category": "Cooling",
+    "partNumber": "P561A",
+    "oemReference": "17920-66F01",
+    "conditions": "F6A with automatic transmission, September 1991–January 1999. Match the installed cap shape and pressure.",
+    "source": {
+      "title": "NTK radiator cap application catalog",
+      "url": "https://www.ngk-sparkplugs.jp/ntk/radiator_cap/list.pdf",
+      "kind": "Manufacturer",
+      "locator": "Suzuki Carry application table, DD51T automatic transmission row",
+      "evidence": "The automatic transmission row lists P561A and Suzuki reference 17920-66F01."
+    }
+  }
+]

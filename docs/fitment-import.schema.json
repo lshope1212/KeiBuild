@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KeiBuild fitment candidates",
+  "type": "array",
+  "maxItems": 50,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["chassisCode", "kind", "title", "manufacturer", "category", "conditions", "source"],
+    "properties": {
+      "chassisCode": { "enum": ["HA3", "HA4", "DD51T", "DA16T"] },
+      "kind": { "enum": ["Part", "Modification"] },
+      "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+      "manufacturer": { "type": "string", "minLength": 1, "maxLength": 80 },
+      "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+      "conditions": { "type": "string", "minLength": 1, "maxLength": 500 },
+      "partNumber": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+      "oemReference": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+      "source": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "url", "kind", "locator", "evidence"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 150 },
+          "url": { "type": "string", "format": "uri", "pattern": "^https?://", "maxLength": 2048 },
+          "kind": { "enum": ["Manufacturer", "Vendor", "Community"] },
+          "locator": { "type": "string", "minLength": 1, "maxLength": 150 },
+          "evidence": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    },
+    "if": { "properties": { "kind": { "const": "Part" } }, "required": ["kind"] },
+    "then": {
+      "required": ["partNumber"],
+      "properties": { "partNumber": { "type": "string" } }
+    }
+  }
+}

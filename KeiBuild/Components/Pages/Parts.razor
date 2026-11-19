@@ -1,0 +1,78 @@
+@page "/parts"
+@inject CatalogStore Catalog
+
+<PageTitle>Parts &amp; modifications | KeiBuild</PageTitle>
+
+<section class="page-intro">
+    <h1>Parts &amp; modifications</h1>
+    <p>Search part numbers, OEM cross-references, and modification listings by chassis.</p>
+</section>
+
+<form method="get" action="/parts" class="filters part-filters" aria-label="Filter parts and modifications">
+    <div class="filter-group">
+        <label for="part-search">Part or keyword</label>
+        <input id="part-search" name="q" type="search" value="@Query" placeholder="Part number, name, category…" maxlength="100" />
+    </div>
+    <div class="filter-group">
+        <label for="part-chassis">Chassis</label>
+        <select id="part-chassis" name="chassis">
+            <option value="">All chassis</option>
+            @foreach (var chassis in Catalog.Chassis)
+            {
+                <option value="@chassis.Code" selected="@chassis.Code.Equals(ChassisCode, StringComparison.OrdinalIgnoreCase)">@chassis.Code · @chassis.Name</option>
+            }
+        </select>
+    </div>
+    <div class="filter-group">
+        <label for="part-kind">Type</label>
+        <select id="part-kind" name="kind">
+            <option value="">All types</option>
+            <option value="Part" selected="@IsKind("Part")">Parts</option>
+            <option value="Modification" selected="@IsKind("Modification")">Modifications</option>
+        </select>
+    </div>
+    <button class="button primary" type="submit">Search</button>
+</form>
+
+@if (Matches.Length == 0)
+{
+    <div class="empty-state">
+        <p>No listings matched your filters.</p>
+        <a href="/parts">Clear filters</a>
+    </div>
+}
+else
+{
+    <p class="result-count">@Matches.Length @(Matches.Length == 1 ? "listing" : "listings")</p>
+    <div class="fitment-grid">
+        @foreach (var entry in Matches)
+        {
+            <FitmentCard Entry="entry" ShowChassis="true" />
+        }
+    </div>
+}
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] private string? Query { get; set; }
+    [SupplyParameterFromQuery(Name = "chassis")] private string? ChassisCode { get; set; }
+    [SupplyParameterFromQuery(Name = "kind")] private string? Kind { get; set; }
+
+    private FitmentEntry[] Matches { get; set; } = [];
+
+    protected override void OnParametersSet()
+    {
+        var query = Query?.Trim() ?? "";
+        Matches = Catalog.PublishedEntries().Where(entry =>
+            (string.IsNullOrEmpty(ChassisCode) || entry.ChassisCode.Equals(ChassisCode, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrEmpty(Kind) || IsKind(entry.Kind.ToString())) &&
+            (MatchesText(entry.Title, query) || MatchesText(entry.PartNumber, query) ||
+             MatchesText(entry.OemReference, query) || MatchesText(entry.Manufacturer, query) ||
+             MatchesText(entry.Category, query) || MatchesText(entry.ChassisCode, query)))
+            .OrderBy(entry => entry.ChassisCode).ThenBy(entry => entry.Kind).ThenBy(entry => entry.Title).ToArray();
+    }
+
+    private bool IsKind(string kind) => kind.Equals(Kind, StringComparison.OrdinalIgnoreCase);
+
+    private static bool MatchesText(string? value, string query) =>
+        value?.Contains(query, StringComparison.OrdinalIgnoreCase) == true;
+}

@@ -1,0 +1,153 @@
+{
+  "chassis": [
+    {
+      "code": "HA3",
+      "make": "Honda",
+      "model": "Acty Truck",
+      "introduced": 1990,
+      "engine": "E07A",
+      "drive": "2WD",
+      "summary": "The two-wheel-drive Acty introduced with Honda’s 1990 update. Honda offered different gearboxes for the STD, SDX and SDX-II launch trims.",
+      "source": {
+        "title": "Honda Acty launch specifications",
+        "url": "https://global.honda/jp/news/1990/4900223a.html",
+        "kind": "Manufacturer",
+        "locator": "Main specifications, 2WD Acty Truck",
+        "evidence": "The M-HA3 columns list 2WD and the E07A engine."
+      }
+    },
+    {
+      "code": "HA4",
+      "make": "Honda",
+      "model": "Acty Truck",
+      "introduced": 1990,
+      "engine": "E07A",
+      "drive": "4WD",
+      "summary": "The Acty with Honda’s Real Time 4WD. The 1990 specifications list the Attack with an ultra-low forward and reverse range, alongside the SDX with a five-speed manual.",
+      "source": {
+        "title": "Honda Acty launch specifications",
+        "url": "https://global.honda/jp/news/1990/4900223a.html",
+        "kind": "Manufacturer",
+        "locator": "Main specifications, 4WD Acty Truck",
+        "evidence": "The M-HA4 columns list Real Time 4WD, the E07A engine, and the Attack and SDX trims."
+      }
+    },
+    {
+      "code": "DD51T",
+      "make": "Suzuki",
+      "model": "Carry",
+      "introduced": 1991,
+      "engine": "F6A",
+      "drive": "4WD",
+      "summary": "A ninth-generation Carry 4WD chassis. Suzuki’s September 1991 specification sheet shows both an extra-low plus five-speed gearbox and a four-speed gearbox with high and low transfer ranges, depending on trim.",
+      "source": {
+        "title": "Suzuki ninth-generation Carry spec sheet",
+        "url": "https://www.suzuki.co.jp/suzuki_digital_library/pdf/1_auto/carry/103.pdf",
+        "kind": "Manufacturer",
+        "locator": "September 1991 specification table, V-DD51T columns",
+        "evidence": "Suzuki lists the F6A and different 4WD gearbox configurations across V-DD51T grades."
+      }
+    },
+    {
+      "code": "DA16T",
+      "make": "Suzuki",
+      "model": "Carry",
+      "introduced": 2013,
+      "engine": "R06A",
+      "drive": "2WD / 4WD",
+      "summary": "Suzuki introduced the eleventh-generation Carry in 2013 with a short 1,905 mm wheelbase. Its launch spec sheet lists rear-wheel-drive and part-time four-wheel-drive configurations.",
+      "source": {
+        "title": "Suzuki eleventh-generation Carry spec sheet",
+        "url": "https://www.suzuki.co.jp/suzuki_digital_library/pdf/1_auto/carry/107.pdf",
+        "kind": "Manufacturer",
+        "locator": "September 2013 specification table, EBD-DA16T",
+        "evidence": "The launch table lists 2WD and part-time 4WD with the R06A engine."
+      }
+    }
+  ],
+  "entries": [
+    {
+      "chassisCode": "HA3",
+      "kind": "Part",
+      "title": "Radiator cap",
+      "manufacturer": "NTK",
+      "category": "Cooling",
+      "partNumber": "P539A",
+      "oemReference": "19045-PR3-004",
+      "conditions": "E07A, March 1990–June 1999 per NTK’s application window. Match the installed cap shape and pressure.",
+      "source": {
+        "title": "NTK radiator cap application catalog",
+        "url": "https://www.ngk-sparkplugs.jp/ntk/radiator_cap/list.pdf",
+        "kind": "Manufacturer",
+        "locator": "Honda Acty/Street application row for HA3, HA4 and related models",
+        "evidence": "The E07A application row lists P539A and the Honda reference 19045-PR3-004."
+      }
+    },
+    {
+      "chassisCode": "HA4",
+      "kind": "Part",
+      "title": "Radiator cap",
+      "manufacturer": "NTK",
+      "category": "Cooling",
+      "partNumber": "P539A",
+      "oemReference": "19045-PR3-004",
+      "conditions": "E07A, March 1990–June 1999 per NTK’s application window. Match the installed cap shape and pressure.",
+      "source": {
+        "title": "NTK radiator cap application catalog",
+        "url": "https://www.ngk-sparkplugs.jp/ntk/radiator_cap/list.pdf",
+        "kind": "Manufacturer",
+        "locator": "Honda Acty/Street application row for HA3, HA4 and related models",
+        "evidence": "The E07A application row lists P539A and the Honda reference 19045-PR3-004."
+      }
+    },
+    {
+      "chassisCode": "HA4",
+      "kind": "Modification",
+      "title": "1.5-inch suspension lift kit",
+      "manufacturer": "HRG Offroad",
+      "category": "Suspension",
+      "partNumber": "HRG-ACT9098-1.5",
+      "conditions": "1990–1998 HA4, per the kit details. HRG specifies off-road use. Confirm the trim with HRG before ordering.",
+      "source": {
+        "title": "HRG Offroad Acty lift kit listing",
+        "url": "https://dealers.hrgoffroad.com/product/1-5-inch-38mm-lift-kit-1990-1998-honda-acty/",
+        "kind": "Manufacturer",
+        "locator": "Product SKU, Kit Details and Warranty Information",
+        "evidence": "HRG lists a 38 mm lift, identifies HA4 in the kit details, and limits use to off-road. The page’s summary table gives a different end year."
+      }
+    },
+    {
+      "chassisCode": "DD51T",
+      "kind": "Part",
+      "title": "Radiator cap",
+      "manufacturer": "NTK",
+      "category": "Cooling",
+      "partNumber": "P539A",
+      "oemReference": "17920-78020",
+      "conditions": "F6A with manual transmission, September 1991–May 1995. Verify the exact build month and match the installed cap shape and pressure.",
+      "source": {
+        "title": "NTK radiator cap application catalog",
+        "url": "https://www.ngk-sparkplugs.jp/ntk/radiator_cap/list.pdf",
+        "kind": "Manufacturer",
+        "locator": "Suzuki Carry application table, September 1991–May 1995 manual row",
+        "evidence": "The early DD51T manual application row lists P539A with Suzuki reference 17920-78020."
+      }
+    },
+    {
+      "chassisCode": "DA16T",
+      "kind": "Part",
+      "title": "Iridium spark plug",
+      "manufacturer": "NGK",
+      "category": "Ignition",
+      "partNumber": "LMAR7CI-8",
+      "conditions": "R06A, August 2015–April 2022 per NGK’s application table. The table lists three plugs.",
+      "source": {
+        "title": "NGK LMAR7CI-8 application bulletin",
+        "url": "https://www.ngk-sparkplugs.jp/image/upload/NR24-006.pdf",
+        "kind": "Manufacturer",
+        "locator": "LMAR7CI-8 vehicle applications, Suzuki Carry DA16T row",
+        "evidence": "NGK lists DA16T with the R06A for this window and specifies a quantity of three."
+      }
+    }
+  ]
+}

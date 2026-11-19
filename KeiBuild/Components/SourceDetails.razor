@@ -1,0 +1,10 @@
+<details class="source-details">
+    <summary>Source details <span class="source-kind">@Source.Kind</span></summary>
+    <p>@Source.Evidence</p>
+    <p class="source-locator">@Source.Locator</p>
+    <a href="@Source.Url" target="_blank" rel="noopener noreferrer">@Source.Title <span class="sr-only">(opens in a new tab)</span></a>
+</details>
+
+@code {
+    [Parameter, EditorRequired] public SourceReference Source { get; set; } = default!;
+}

@@ -1,0 +1,75 @@
+﻿@page "/"
+@inject CatalogStore Catalog
+
+<PageTitle>KeiBuild | Kei truck chassis index</PageTitle>
+
+<section class="hero" aria-labelledby="welcome">
+    <img class="hero-image" src="@Assets["images/kei-truck-garage.jpg"]" alt="Illustration of an ivory kei truck parked in a garage" fetchpriority="high" />
+    <div class="hero-copy">
+        <p class="eyebrow">The kei truck build guide</p>
+        <h1 id="welcome">Find your truck.<br />Plan your build.</h1>
+        <p>Look up your chassis, compare part numbers, and see the fitment details behind each listing.</p>
+        <a class="button primary" href="#chassis-index">Explore chassis</a>
+    </div>
+</section>
+
+<section id="chassis-index" class="index-section" aria-labelledby="index-title">
+    <div class="section-heading">
+        <div>
+            <h2 id="index-title">Chassis index</h2>
+            <p>Start with the chassis code on your truck’s ID plate.</p>
+        </div>
+        <form method="get" action="/#chassis-index" class="filters chassis-filters" aria-label="Filter chassis">
+            <label class="sr-only" for="chassis-search">Search chassis</label>
+            <input id="chassis-search" name="q" type="search" value="@Query" placeholder="Search HA4, Carry…" maxlength="100" />
+            <label class="sr-only" for="make">Make</label>
+            <select id="make" name="make">
+                <option value="">All makes</option>
+                @foreach (var make in Catalog.Chassis.Select(chassis => chassis.Make).Distinct())
+                {
+                    <option value="@make" selected="@make.Equals(Make, StringComparison.OrdinalIgnoreCase)">@make</option>
+                }
+            </select>
+            <button class="button secondary" type="submit">Search</button>
+        </form>
+    </div>
+
+    @if (Matches.Length == 0)
+    {
+        <div class="empty-state">
+            <p>No chassis matched your search.</p>
+            <a href="/#chassis-index">Clear filters</a>
+        </div>
+    }
+    else
+    {
+        <div class="chassis-grid">
+            @foreach (var chassis in Matches)
+            {
+                <a class="chassis-card" href="@($"/chassis/{chassis.Code}")">
+                    <span class="card-make">@chassis.Name</span>
+                    <strong class="chassis-code">@chassis.Code</strong>
+                    <span class="card-specs"><span>@chassis.Drive</span><span>@chassis.Engine</span><span>@chassis.Introduced</span></span>
+                    <span class="card-link">View chassis</span>
+                </a>
+            }
+        </div>
+    }
+</section>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")] private string? Query { get; set; }
+    [SupplyParameterFromQuery(Name = "make")] private string? Make { get; set; }
+
+    private Chassis[] Matches { get; set; } = [];
+
+    protected override void OnParametersSet()
+    {
+        var query = Query?.Trim() ?? "";
+        Matches = Catalog.Chassis.Where(chassis =>
+            (string.IsNullOrEmpty(Make) || chassis.Make.Equals(Make, StringComparison.OrdinalIgnoreCase)) &&
+            (chassis.Code.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+             chassis.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+             chassis.Engine.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+    }
+}
