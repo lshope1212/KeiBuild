@@ -20,18 +20,30 @@ Open [KeiBuild on localhost](http://localhost:5117/).
 
 The review inbox runs in the **Development** environment and the supplied launch profiles bind to localhost. The inbox and its decisions persist in `KeiBuild/.local/review.json`. A production run serves the checked-in catalog. To promote a locally approved listing to the checked-in catalog, add the item’s `entry` from the review file to the `entries` array in `KeiBuild/Data/catalog.json`, then restart. A local run displays that promoted claim once even if its review history is still present.
 
+## Try the ingestion pipeline
+
+Run this from the solution folder in PowerShell. It uses a clearly labeled synthetic document and a fake extractor, so it works without an API key.
+
+```powershell
+dotnet run --project .\KeiBuild.Ingestion -- --registry .\docs\sources.example.json --source synthetic-ha4 --file .\docs\fixtures\synthetic-fitment.html --fake-response .\docs\fixtures\synthetic-response.json
+```
+
+The console prints the path to a review-ready `candidates.json`. Use the [data pipeline guide](docs/data-pipeline.md) to import the fixture into an isolated inbox, configure OpenAI for a real document, run the console in Visual Studio, or retrieve an approved URL.
+
+`dotnet test .\KeiBuild.slnx` runs the xUnit tests.
+
 ## Find your way around
 
 | File | Role |
 | --- | --- |
 | `KeiBuild/Components/Pages/` | Razor pages for the chassis index, chassis details, parts search, and review inbox. Razor components are the closest equivalent to a WPF view or user control. |
-| `KeiBuild/Catalog/CatalogModels.cs` | Chassis, fitment claim, source, and review records. |
-| `KeiBuild/Catalog/CatalogStore.cs` | Loads the catalog, validates imports, checks for duplicates, and saves review decisions. Pages get the store through dependency injection. |
+| `KeiBuild/Catalog/` | Chassis and review models. The store loads the catalog and saves review decisions. |
+| `KeiBuild.Catalog/` | Fitment and source records, import validation, JSON serialization, and duplicate comparison shared by the web and console apps. |
+| `KeiBuild.Ingestion/` | Console app for single-document collection, normalization, extraction, validation, and export. |
+| `KeiBuild.Ingestion.Tests/` | xUnit coverage for collection policy, grounding, validation, and the offline review workflow. |
 | `KeiBuild/Data/catalog.json` | Starter chassis and fitment claims with source locators. |
 
 The app uses .NET 10 and static server rendering. Search is an ordinary GET request with a shareable URL, and the review page submits standard POST forms. Blazor’s per-page Interactive Server mode can be added when a feature needs live state, such as comparing options in a build planner. [Microsoft’s Blazor render modes](https://learn.microsoft.com/en-us/aspnet/core/blazor/components/render-modes?view=aspnetcore-10.0)
-
-See the [data collection workflow](docs/data-pipeline.md) for the extraction prompt, review criteria, and the sequence for expanding the catalog.
 
 <details>
 <summary>Hero image provenance</summary>

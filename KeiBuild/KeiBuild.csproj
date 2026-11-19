@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../KeiBuild.Catalog/KeiBuild.Catalog.csproj" />
     <Content Update="Data/catalog.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Update=".local/**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
   </ItemGroup>

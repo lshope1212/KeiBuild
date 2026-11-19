@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
+    <ProjectReference Include="../KeiBuild.Ingestion/KeiBuild.Ingestion.csproj" />
+    <ProjectReference Include="../KeiBuild/KeiBuild.csproj" />
+    <None Include="../docs/fixtures/**" LinkBase="Fixtures" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../docs/sources.example.json" Link="Fixtures/sources.example.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../docs/example-import.json" Link="Fixtures/example-import.json" CopyToOutputDirectory="PreserveNewest" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

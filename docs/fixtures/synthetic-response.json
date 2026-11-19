@@ -1,0 +1,16 @@
+{
+  "claims": [
+    {
+      "chassisCode": "HA4",
+      "kind": "Part",
+      "title": "SYNTHETIC — Demo cabin filter",
+      "manufacturer": "Fixture Parts Co.",
+      "category": "Cabin",
+      "partNumber": "00-FIXTURE-12",
+      "oemReference": "00-FIXTURE-OE",
+      "firstLine": 1,
+      "lastLine": 4,
+      "fitmentLine": 4
+    }
+  ]
+}

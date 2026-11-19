@@ -1,0 +1,15 @@
+[
+  {
+    "id": "synthetic-ha4",
+    "publisher": "Fixture Parts Co. (fictional)",
+    "title": "SYNTHETIC — KeiBuild offline test fixture",
+    "url": "https://keibuild-fixture.example/ha4-demo",
+    "kind": "Manufacturer",
+    "format": "Html",
+    "automatedRetrievalApproved": false,
+    "permissionNotes": "Fabricated for testing KeiBuild. The URL and all product information are synthetic.",
+    "snapshotAllowed": true,
+    "language": "en",
+    "lastRetrievedAtUtc": null
+  }
+]
