@@ -30,35 +30,40 @@ public sealed class CampaignStore(ResearchDb db)
         }
     }
 
-    public async Task<ResearchCampaign> StartAsync(string name, CampaignMode mode, CancellationToken ct)
+    public async Task<ResearchCampaign> StartAsync(string name, CampaignMode mode, CancellationToken ct, ResearchTarget? target = null)
     {
         var existing = await db.Campaigns.SingleOrDefaultAsync(item => item.Name == name, ct);
         if (existing is not null)
         {
             if (existing.Mode != mode)
                 throw new IngestionException("The campaign already exists in a different mode.");
+            if (target is not null && !await db.VehicleVariants.AnyAsync(v => v.Id == existing.VehicleVariantId &&
+                v.Chassis == target.Chassis && v.Engine == target.Engine && db.VehicleModels.Any(m =>
+                    m.Id == v.VehicleModelId && m.Make == target.Make && m.Model == target.Model), ct))
+                throw new IngestionException("Campaign already exists for another target.");
             return existing;
         }
 
-        var model = await db.VehicleModels.SingleOrDefaultAsync(item => item.Make == Ha4Plan.Make && item.Model == Ha4Plan.Model, ct);
+        target ??= ResearchTarget.Default;
+        var model = await db.VehicleModels.SingleOrDefaultAsync(item => item.Make == target.Make && item.Model == target.Model, ct);
         if (model is null)
         {
-            model = new VehicleModel { Make = Ha4Plan.Make, Model = Ha4Plan.Model };
+            model = new VehicleModel { Make = target.Make, Model = target.Model };
             db.VehicleModels.Add(model);
         }
         var variant = await db.VehicleVariants.SingleOrDefaultAsync(item => item.VehicleModelId == model.Id &&
-            item.Chassis == Ha4Plan.Chassis && item.Engine == Ha4Plan.Engine, ct);
+            item.Chassis == target.Chassis && item.Engine == target.Engine, ct);
         if (variant is null)
         {
-            variant = new VehicleVariant { VehicleModelId = model.Id, Chassis = Ha4Plan.Chassis, Engine = Ha4Plan.Engine, Era = Ha4Plan.Era };
+            variant = new VehicleVariant { VehicleModelId = model.Id, Chassis = target.Chassis, Engine = target.Engine, Era = target.Era };
             db.VehicleVariants.Add(variant);
         }
         var campaign = new ResearchCampaign { Name = name, Mode = mode, VehicleVariantId = variant.Id };
         db.Campaigns.Add(campaign);
-        var topics = Ha4Plan.Topics.ToDictionary(topic => topic.Key, topic =>
+        var topics = ResearchTarget.Topics.ToDictionary(topic => topic.Key, topic =>
             new ResearchTopic { CampaignId = campaign.Id, Key = topic.Key, Title = topic.Title });
         db.Topics.AddRange(topics.Values);
-        db.Queries.AddRange(Ha4Plan.Queries().Select((query, priority) => new SearchQuery
+        db.Queries.AddRange(target.Queries().Select((query, priority) => new SearchQuery
         {
             CampaignId = campaign.Id, TopicId = topics[query.Topic].Id,
             Text = query.Text, Language = query.Language, Priority = priority
@@ -94,6 +99,25 @@ public sealed class CampaignStore(ResearchDb db)
                 await EnsureResourceAsync(campaign.Id, policy.Scope, policy.Publisher, ResourceKind.Technical, 85, ct);
         }
         await db.SaveChangesAsync(ct);
+        await ReconcilePoliciesAsync(campaign.Id, policies, ct);
+    }
+
+    internal async Task ReconcilePoliciesAsync(Guid campaign, IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
+    {
+        var queue = db.Jobs.AsNoTracking().Where(j => j.Resource.CampaignId == campaign &&
+            (j.State == WorkState.Pending || j.State == WorkState.Blocked)).OrderBy(j => j.Id);
+        for (var offset = 0; ; offset += 256)
+        {
+            var page = await queue.Skip(offset).Take(256).Select(j => new { j.Id, j.State, j.Resource }).ToListAsync(ct);
+            var changes = page.GroupBy(j => PolicyRules.Permitted(policies, j.Resource) == null ? WorkState.Blocked : WorkState.Pending);
+            foreach (var group in changes)
+            {
+                var ids = group.Where(j => j.State != group.Key).Select(j => j.Id).ToArray();
+                if (ids.Length > 0)
+                    await db.Jobs.Where(j => ids.Contains(j.Id)).ExecuteUpdateAsync(u => u.SetProperty(j => j.State, group.Key), ct);
+            }
+            if (page.Count < 256) return;
+        }
     }
 
     private async Task EnsureResourceAsync(Guid campaign, string url, string title, ResourceKind kind, int score, CancellationToken ct)
@@ -118,7 +142,10 @@ public sealed class CampaignStore(ResearchDb db)
         var now = DateTimeOffset.UtcNow;
         var interrupted = await db.Runs.Where(run => run.CampaignId == campaign && run.EndedAt == null).ToListAsync(ct);
         foreach (var run in interrupted)
+        {
             run.EndedAt = now;
+            run.StopReason = "Interrupted. Recovered unfinished operations.";
+        }
         var ids = interrupted.Select(item => item.Id).ToArray();
         var searches = await db.SearchAttempts.Where(item => ids.Contains(item.RunId) && item.EndedAt == null).ToListAsync(ct);
         foreach (var attempt in searches)
@@ -134,11 +161,13 @@ public sealed class CampaignStore(ResearchDb db)
         }
         foreach (var query in await db.Queries.Where(query => query.CampaignId == campaign && query.State == WorkState.Running).ToListAsync(ct))
         {
+            query.Attempts = Math.Max(0, query.Attempts - 1);
             query.State = query.Attempts < retries ? WorkState.Pending : WorkState.Failed;
             query.DueAt = now;
         }
         foreach (var job in await db.Jobs.Where(job => job.Resource.CampaignId == campaign && job.State == WorkState.Running).ToListAsync(ct))
         {
+            job.Attempts = Math.Max(0, job.Attempts - 1);
             job.State = job.Attempts < retries ? WorkState.Pending : WorkState.Failed;
             job.DueAt = now;
         }
@@ -200,7 +229,8 @@ public sealed class CampaignStore(ResearchDb db)
                               where claim.CampaignId == campaign.Id && claim.State == Decision.Approved && evidence.FitmentJson != null
                               orderby approval.ApprovedAt, claim.Id, evidence.Id
                               select evidence.FitmentJson!).ToListAsync(ct);
-        var import = new CatalogImport([Ha4Plan.Chassis]);
+        var variant = await db.VehicleVariants.SingleAsync(v => v.Id == campaign.VehicleVariantId, ct);
+        var import = new CatalogImport([variant.Chassis]);
         var entries = payloads.Select(row => JsonSerializer.Deserialize<FitmentEntry>(row, CatalogImport.JsonOptions))
             .Select((row, index) => import.Validate(row, index + 1)).DistinctBy(CatalogImport.ClaimKey)
             .Skip(offset).Take(CatalogImport.MaxEntries).ToArray();

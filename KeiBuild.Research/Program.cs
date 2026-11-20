@@ -29,8 +29,9 @@ try
     var command = CommandLine.Parse(args);
     if (command.Command == "plan" || command.Has("--dry-run"))
     {
-        Print(new { command.Campaign, Chassis = Ha4Plan.Chassis, command.Limits,
-            Queries = Ha4Plan.Queries().ToArray() });
+        var target = await ResearchTarget.ReadAsync(command.Get("--target-file"), CancellationToken.None);
+        Print(new { command.Campaign, target.Chassis, command.Provider, command.MaxMinutes, command.Limits,
+            Queries = target.Queries().ToArray() });
         return 0;
     }
 
@@ -90,11 +91,27 @@ static async Task ExecuteAsync(IServiceProvider services, CommandLine command, C
         }
     }
 
-    if (command.Command is "status" or "sources" or "claims")
+    if (command.Command == "stop")
+    {
+        var stopped = await db.Campaigns.Where(c => c.Name == command.Campaign)
+            .ExecuteUpdateAsync(u => u.SetProperty(c => c.StopRequested, true), ct);
+        if (stopped == 0) throw new IngestionException("Campaign not found.");
+        Console.WriteLine("Stop requested. The worker finishes its active batch and releases the database lease.");
+        return;
+    }
+    if (command.Command is "status" or "sources" or "claims" or "jobs" or "coverage" or "summary")
     {
         var readCampaign = await store.FindAsync(command.Campaign, ct);
+        if (command.Command == "summary")
+        {
+            var summary = new { Status = await report.StatusAsync(readCampaign, ct), Coverage = await report.CoverageAsync(readCampaign.Id, ct) };
+            await CampaignStore.WriteNewAsync(command.Need("--output"), JsonSerializer.Serialize(summary, CatalogImport.JsonOptions), ct);
+            return;
+        }
         Print(command.Command switch
         {
+            "jobs" => await report.JobsAsync(readCampaign.Id, command.Offset, ct),
+            "coverage" => await report.CoverageAsync(readCampaign.Id, ct),
             "sources" => await report.SourcesAsync(readCampaign.Id, command.Offset, ct),
             "claims" => await report.ClaimsAsync(readCampaign.Id, command.Offset, ct),
             _ => await report.StatusAsync(readCampaign, ct)
@@ -104,7 +121,7 @@ static async Task ExecuteAsync(IServiceProvider services, CommandLine command, C
 
     await using var lease = await store.LockAsync(ct);
     var campaign = command.Command is "start" or "demo"
-        ? await store.StartAsync(command.Campaign, command.Mode, ct)
+        ? await store.StartAsync(command.Campaign, command.Mode, ct, command.Get("--target-file") is { } path ? await ResearchTarget.ReadAsync(path, ct) : null)
         : await store.FindAsync(command.Campaign, ct);
     switch (command.Command)
     {
@@ -155,11 +172,12 @@ static async Task RunAsync(ResearchDb db, CampaignStore store, CampaignReport re
 {
     var discover = command.Command != "work" && command.Limits.Searches > 0;
     var work = command.Command != "discover" && command.Limits.Pages > 0;
+    string? pause;
     if (campaign.Mode == CampaignMode.Offline)
     {
         var fake = new FakeResearch();
-        await new CampaignRunner(db, store, fake, fake, fake)
-            .RunAsync(campaign, command.Command, command.Limits, discover, work, ct);
+        pause = await new CampaignSession(db, new CampaignRunner(db, store, fake, fake, fake), fake)
+            .RunAsync(campaign, command, discover, work, ct);
     }
     else
     {
@@ -168,15 +186,21 @@ static async Task RunAsync(ResearchDb db, CampaignStore store, CampaignReport re
         Func<string, string?> keys = Environment.GetEnvironmentVariable;
         var search = discover ? new BraveSearchProvider(searchHttp, ProviderKeys.Require(keys, "BRAVE_SEARCH_API_KEY")) : null;
         var model = keys("KEIBUILD_OPENAI_MODEL")?.Trim();
-        var ai = work && command.Limits.AiCalls > 0 && command.Limits.BudgetUsd >= command.Limits.AiCostUsd
-            ? new OpenAiKnowledgeExtractor(string.IsNullOrWhiteSpace(model) ? "gpt-4o-mini" : model,
-                ProviderKeys.Require(keys, "OPENAI_API_KEY")) : null;
+        IKnowledgeExtractor? ai = null;
+        if (work && command.Limits.AiCalls > 0)
+        {
+            if (command.Provider == "codex") ai = new CodexKnowledgeExtractor();
+            else if (command.Limits.BudgetUsd >= command.Limits.AiCostUsd)
+                ai = new OpenAiKnowledgeExtractor(string.IsNullOrWhiteSpace(model) ? "gpt-4o-mini" : model,
+                    ProviderKeys.Require(keys, "OPENAI_API_KEY"));
+        }
         var state = keys("KEIBUILD_RESEARCH_STATE_DIR") ?? Path.Combine(".local", "research", "http");
         var collector = new ResearchHttpCollector(new HttpDocumentCollector(crawlHttp, state));
-        await new CampaignRunner(db, store, search, collector, ai)
-            .RunAsync(campaign, command.Command, command.Limits, discover, work, ct);
+        pause = await new CampaignSession(db, new CampaignRunner(db, store, search, collector, ai), ai)
+            .RunAsync(campaign, command, discover, work, ct);
     }
     Print(await report.StatusAsync(campaign, ct));
+    if (pause != null) throw new IngestionException($"Campaign paused. {pause}");
 }
 
 static void Print(object value) => Console.WriteLine(JsonSerializer.Serialize(value, new JsonSerializerOptions(CatalogImport.JsonOptions)

@@ -35,6 +35,9 @@ public sealed class ResearchCampaign
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public Guid VehicleVariantId { get; set; }
+    public bool StopRequested { get; set; }
+    public DateTimeOffset? SearchAfter { get; set; }
+    public DateTimeOffset? ExtractionAfter { get; set; }
     public CampaignMode Mode { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
@@ -54,6 +57,9 @@ public sealed class SearchQuery
     public Guid TopicId { get; set; }
     public string Language { get; set; } = "";
     public string Text { get; set; } = "";
+    public Guid? OriginClaimId { get; set; }
+    public string? GapPartNumber { get; set; }
+    public string? GapReason { get; set; }
     public int Priority { get; set; }
     public WorkState State { get; set; }
     public int Attempts { get; set; }
@@ -64,6 +70,8 @@ public sealed class ResearchRun
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid CampaignId { get; set; }
+    public string? Provider { get; set; }
+    public string? StopReason { get; set; }
     public string Command { get; set; } = "";
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? EndedAt { get; set; }

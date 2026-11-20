@@ -449,12 +449,21 @@ namespace KeiBuild.Research.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTimeOffset?>("ExtractionAfter")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<int>("Mode")
                         .HasColumnType("integer");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("SearchAfter")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("StopRequested")
+                        .HasColumnType("boolean");
 
                     b.Property<Guid>("VehicleVariantId")
                         .HasColumnType("uuid");
@@ -510,11 +519,17 @@ namespace KeiBuild.Research.Data.Migrations
                     b.Property<int>("Pages")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Provider")
+                        .HasColumnType("text");
+
                     b.Property<int>("Searches")
                         .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("StartedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StopReason")
+                        .HasColumnType("text");
 
                     b.Property<int>("WithheldClaims")
                         .HasColumnType("integer");
@@ -625,9 +640,18 @@ namespace KeiBuild.Research.Data.Migrations
                     b.Property<DateTimeOffset>("DueAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("GapPartNumber")
+                        .HasColumnType("text");
+
+                    b.Property<string>("GapReason")
+                        .HasColumnType("text");
+
                     b.Property<string>("Language")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<Guid?>("OriginClaimId")
+                        .HasColumnType("uuid");
 
                     b.Property<int>("Priority")
                         .HasColumnType("integer");
@@ -643,6 +667,8 @@ namespace KeiBuild.Research.Data.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("OriginClaimId");
 
                     b.HasIndex("TopicId");
 
@@ -975,6 +1001,11 @@ namespace KeiBuild.Research.Data.Migrations
                         .HasForeignKey("CampaignId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("KeiBuild.Research.Data.KnowledgeClaim", null)
+                        .WithMany()
+                        .HasForeignKey("OriginClaimId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("KeiBuild.Research.Data.ResearchTopic", null)
                         .WithMany()

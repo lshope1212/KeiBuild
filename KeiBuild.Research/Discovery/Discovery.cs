@@ -10,34 +10,49 @@ namespace KeiBuild.Research.Discovery;
 public sealed record TopicPlan(string Key, string Title, string[] English, string[] Japanese);
 public sealed record PlannedQuery(string Topic, string Language, string Text);
 
-public static class Ha4Plan
+public sealed record ResearchTarget(string Make, string Model, string Chassis, string Engine, string Era,
+    string EnglishName, string JapaneseName)
 {
-    public const string Make = "Honda";
-    public const string Model = "Acty Truck";
-    public const string Chassis = "HA4";
-    public const string Engine = "E07A";
-    public const string Era = "1990s reference period";
+    public static ResearchTarget Default { get; } = new("Honda", "Acty Truck", "HA4", "E07A",
+        "1990s reference period", "Honda Acty", "ホンダ アクティ");
+
+    public static async Task<ResearchTarget> ReadAsync(string? path, CancellationToken ct)
+    {
+        if (path is null) return Default;
+        using var file = File.OpenRead(path);
+        ResearchTarget? target;
+        try
+        {
+            target = await JsonSerializer.DeserializeAsync<ResearchTarget>(file, JsonSerializerOptions.Web, ct);
+        }
+        catch (JsonException ex) { throw new IngestionException("Invalid research target JSON.", ex); }
+        if (target is null || !Regex.IsMatch(target.Chassis ?? "", @"\A[A-Z0-9-]{2,16}\z") ||
+            new[] { target.Make, target.Model, target.Engine, target.Era, target.EnglishName, target.JapaneseName }
+                .Any(s => string.IsNullOrWhiteSpace(s) || s.Length > 100 || s.Any(char.IsControl)))
+            throw new IngestionException("Target requires make, model, chassis, engine, era, EnglishName and JapaneseName.");
+        return target;
+    }
 
     public static IReadOnlyList<TopicPlan> Topics { get; } =
     [
         new("identity", "Vehicle identity", ["specifications dimensions drivetrain", "production chassis serial trims transmission"], ["主要諸元 寸法 駆動方式", "車台番号 型式 グレード"]),
         new("oem-parts", "OEM parts", ["OEM parts catalog", "parts diagram superseded part number"], ["純正部品 品番 部品図", "パーツカタログ 互換 代替"]),
-        new("maintenance", "Maintenance", ["E07A timing belt water pump part number", "service intervals ignition cooling filters fluids"], ["E07A タイミングベルト ウォーターポンプ", "整備 点検 交換時期 プラグ フィルター"]),
+        new("maintenance", "Maintenance", ["{engine} timing belt water pump part number", "service intervals ignition cooling filters fluids"], ["{engine} タイミングベルト ウォーターポンプ", "整備 点検 交換時期 プラグ フィルター"]),
         new("mechanical", "Mechanical systems", ["suspension specifications brake replacement", "steering electrical transmission component"], ["足回り ブレーキ 諸元 部品", "ステアリング 電装 トランスミッション"]),
         new("modifications", "Modifications", ["lift kit wheel tire fitment exclusions", "springs shocks exhaust lighting compatibility"], ["リフトアップ ホイール タイヤ 適合", "サスペンション マフラー 取付 条件"]),
         new("troubleshooting", "Troubleshooting", ["common problems diagnostic symptoms", "cooling ignition drivetrain troubleshooting"], ["故障 診断 症状 修理", "冷却 点火 駆動 不具合"]),
-        new("japanese", "Japanese references", ["Japanese service manual technical bulletin", "Japan Honda technical data parts application"], ["整備 マニュアル サービス資料", "技術情報 整備資料 純正部品"])
+        new("japanese", "Japanese references", ["Japanese service manual technical bulletin", "Japan manufacturer technical data parts application"], ["整備 マニュアル サービス資料", "技術情報 整備資料 純正部品"])
     ];
 
-    public static IEnumerable<PlannedQuery> Queries()
+    public IEnumerable<PlannedQuery> Queries()
     {
         // Put both languages for each topic in the first sweep before generating narrower variants.
         for (var pass = 0; pass < 2; pass++)
         {
             foreach (var topic in Topics)
             {
-                yield return new(topic.Key, "en", $"{Make} Acty {Chassis} {topic.English[pass]}");
-                yield return new(topic.Key, "ja", $"ホンダ アクティ {Chassis} {topic.Japanese[pass]}");
+                yield return new(topic.Key, "en", $"{EnglishName} {Chassis} {topic.English[pass].Replace("{engine}", Engine)}");
+                yield return new(topic.Key, "ja", $"{JapaneseName} {Chassis} {topic.Japanese[pass].Replace("{engine}", Engine)}");
             }
         }
     }
@@ -126,15 +141,15 @@ public sealed class BraveSearchProvider(HttpClient client, string key) : ISearch
 
 public static partial class Relevance
 {
-    public static (ResourceKind Kind, int Score) Classify(Uri url, string title, string snippet)
+    public static (ResourceKind Kind, int Score) Classify(Uri url, string title, string snippet, string chassis, string engine)
     {
         var text = $"{title} {snippet} {url.AbsolutePath}";
-        if (!ChassisMention().IsMatch(text))
+        if (!Mentions(text, chassis))
             return (ResourceKind.Irrelevant, 0);
         var score = 50;
         if (TechnicalTerms().IsMatch(text))
             score += 20;
-        if (text.Contains("E07A", StringComparison.OrdinalIgnoreCase))
+        if (text.Contains(engine, StringComparison.OrdinalIgnoreCase))
             score += 8;
         var host = url.IdnHost;
         if (host is "global.honda" or "honda.co.jp" || host.EndsWith(".honda.co.jp", StringComparison.Ordinal))
@@ -146,8 +161,8 @@ public static partial class Relevance
         return (ResourceKind.Technical, score);
     }
 
-    [GeneratedRegex("(?<![a-z0-9])HA4(?![a-z0-9])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    public static partial Regex ChassisMention();
+    public static bool Mentions(string text, string chassis) =>
+        Regex.IsMatch(text, $"(?<![a-z0-9]){Regex.Escape(chassis)}(?![a-z0-9])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     [GeneratedRegex("part|specification|engine|drivetrain|brake|suspension|manual|maintenance|fitment|repair|品番|部品|整備|故障|適合|諸元", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex TechnicalTerms();

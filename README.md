@@ -47,7 +47,7 @@ The console prints the path to a review-ready `candidates.json`. Use the [data p
 
 The app uses .NET 10 and static server rendering. Search is an ordinary GET request with a shareable URL, and the review page submits standard POST forms. Blazor’s per-page Interactive Server mode can be added when a feature needs live state, such as comparing options in a build planner. [Microsoft’s Blazor render modes](https://learn.microsoft.com/en-us/aspnet/core/blazor/components/render-modes?view=aspnetcore-10.0)
 
-The [research guide](docs/research.md) covers the PostgreSQL setup, credential-free HA4 campaign, bounded live discovery, and reviewed fitment exports.
+The [research guide](docs/research.md) covers PostgreSQL setup, the offline HA4 demo, bounded continuous campaigns using a local Codex login, evidence review, and campaign exports.
 
 <details>
 <summary>Hero image provenance</summary>

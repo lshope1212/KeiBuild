@@ -45,6 +45,7 @@ public sealed class ResearchDb(DbContextOptions<ResearchDb> options) : DbContext
         model.Entity<SearchQuery>().HasIndex(item => new { item.CampaignId, item.Language, item.Text }).IsUnique();
         model.Entity<SearchQuery>().HasIndex(item => new { item.CampaignId, item.State, item.DueAt });
         Link<SearchQuery, ResearchCampaign>(model, nameof(SearchQuery.CampaignId));
+        Link<SearchQuery, KnowledgeClaim>(model, nameof(SearchQuery.OriginClaimId));
         Link<SearchQuery, ResearchTopic>(model, nameof(SearchQuery.TopicId));
         Link<ResearchRun, ResearchCampaign>(model, nameof(ResearchRun.CampaignId));
         model.Entity<ResearchRun>().Property(item => item.EstimatedUsd).HasPrecision(12, 6);

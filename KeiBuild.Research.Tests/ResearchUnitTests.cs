@@ -17,7 +17,7 @@ public sealed class ResearchUnitTests
     [Fact]
     public void Ha4PlanCoversEveryTopicInBothLanguages()
     {
-        var queries = Ha4Plan.Queries().ToArray();
+        var queries = ResearchTarget.Default.Queries().ToArray();
         Assert.Equal(28, queries.Length);
         Assert.Equal(28, queries.DistinctBy(query => query.Text).Count());
         Assert.All(queries, query => Assert.Contains("HA4", query.Text));
@@ -25,6 +25,24 @@ public sealed class ResearchUnitTests
         Assert.Contains(queries, query => query.Language == "en" && query.Text.Contains("timing belt"));
         Assert.Equal(7, queries.Take(14).GroupBy(query => query.Topic).Count());
         Assert.All(queries.GroupBy(query => query.Topic), group => Assert.Equal(2, group.Select(query => query.Language).Distinct().Count()));
+    }
+
+    [Fact]
+    public void AlternateTargetControlsQueriesSchemaAndEvidenceValidation()
+    {
+        var target = new ResearchTarget("Fixture", "Truck", "DD51T", "TEST", "Fixture era", "Fixture Truck", "架空トラック");
+        Assert.All(target.Queries(), query =>
+        {
+            Assert.Contains("DD51T", query.Text);
+            Assert.DoesNotContain("HA4", query.Text);
+            Assert.DoesNotContain("E07A", query.Text);
+        });
+        Assert.Contains("DD51T", KnowledgePrompt.Schema([target.Chassis]).ToString());
+        var normalized = DocumentNormalizer.Normalize(Document("DD51T test truck\nClearance: 8 mm"), DocumentFormat.Text);
+        var draft = new FactDraft(FactKind.MechanicalSpecification, "test truck", "Clearance", "8", "mm",
+            null, null, null, null, null, 1, 2, 2);
+        Assert.NotNull(FactEvidence.Validate(draft, normalized, target.Chassis));
+        Assert.Null(FactEvidence.Validate(draft, normalized, ResearchTarget.Default.Chassis));
     }
 
     [Fact]
@@ -53,7 +71,7 @@ public sealed class ResearchUnitTests
     [InlineData("https://example.com/ha40", "HA40 specification", ResourceKind.Irrelevant)]
     [InlineData("https://example.com/資料", "アクティ HA4 部品 品番", ResourceKind.Technical)]
     public void RelevanceUsesExactChassisAndSourceSignals(string url, string title, ResourceKind kind) =>
-        Assert.Equal(kind, Relevance.Classify(new Uri(url), title, "").Kind);
+        Assert.Equal(kind, Relevance.Classify(new Uri(url), title, "", "HA4", "E07A").Kind);
 
     [Theory]
     [InlineData("http://example.com/ha4/")]
@@ -105,14 +123,14 @@ public sealed class ResearchUnitTests
         Assert.Equal("ja", normalized.Language);
         var draft = new FactDraft(FactKind.MaintenanceInterval, "テスト HA4", "間隔", "24000", "km", null, null, null,
             "HA4 架空の仕様", "Synthetic translation", 1, 4, 4);
-        var valid = Assert.IsType<GroundedFact>(FactEvidence.Validate(draft, normalized));
+        var valid = Assert.IsType<GroundedFact>(FactEvidence.Validate(draft, normalized, "HA4"));
         Assert.Contains("24000 km", valid.Passage);
         Assert.Equal("Synthetic translation", valid.EnglishTranslation);
-        Assert.Null(FactEvidence.Validate(draft with { Value = "99999" }, normalized));
-        Assert.Null(FactEvidence.Validate(draft with { Unit = null }, normalized));
-        Assert.Null(FactEvidence.Validate(draft with { Unit = "mi" }, normalized));
-        Assert.Null(FactEvidence.Validate(draft with { Applicability = "HA4 2005" }, normalized));
-        Assert.Null(FactEvidence.Validate(draft with { FactLine = 2 }, normalized));
+        Assert.Null(FactEvidence.Validate(draft with { Value = "99999" }, normalized, "HA4"));
+        Assert.Null(FactEvidence.Validate(draft with { Unit = null }, normalized, "HA4"));
+        Assert.Null(FactEvidence.Validate(draft with { Unit = "mi" }, normalized, "HA4"));
+        Assert.Null(FactEvidence.Validate(draft with { Applicability = "HA4 2005" }, normalized, "HA4"));
+        Assert.Null(FactEvidence.Validate(draft with { FactLine = 2 }, normalized, "HA4"));
     }
 
     [Fact]
@@ -123,7 +141,7 @@ public sealed class ResearchUnitTests
         var document = Document("HA4 fixture");
         var normalized = DocumentNormalizer.Normalize(document, source.Format);
         var reply = new KnowledgeResponse("""{"facts":[],"fitments":[],"sourceUrl":"https://other.example/"}""");
-        await Assert.ThrowsAsync<IngestionException>(() => KnowledgeAnalysis.ValidateAsync(reply, source, document, normalized, CancellationToken.None));
+        await Assert.ThrowsAsync<IngestionException>(() => KnowledgeAnalysis.ValidateAsync(reply, source, document, normalized, CancellationToken.None, "HA4"));
     }
 
     [Fact]
@@ -131,10 +149,10 @@ public sealed class ResearchUnitTests
     {
         var fact = new GroundedFact(FactKind.MechanicalSpecification, "clearance", "gap", "20", "mm",
             " Example  Parts ", "000-11", null, "HA4 manual", "Line 1", "Grounded", null);
-        var group = ClaimIdentity.Group(fact);
-        Assert.Equal(group, ClaimIdentity.Group(fact with { Manufacturer = "example parts" }));
-        Assert.NotEqual(group, ClaimIdentity.Group(fact with { PartNumber = "00011" }));
-        Assert.NotEqual(group, ClaimIdentity.Group(fact with { Applicability = "HA4 automatic" }));
+        var group = ClaimIdentity.Group(fact, "HA4");
+        Assert.Equal(group, ClaimIdentity.Group(fact with { Manufacturer = "example parts" }, "HA4"));
+        Assert.NotEqual(group, ClaimIdentity.Group(fact with { PartNumber = "00011" }, "HA4"));
+        Assert.NotEqual(group, ClaimIdentity.Group(fact with { Applicability = "HA4 automatic" }, "HA4"));
         Assert.NotEqual(ClaimIdentity.Claim(fact, group), ClaimIdentity.Claim(fact with { Value = "21" }, group));
     }
 

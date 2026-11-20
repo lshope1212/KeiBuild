@@ -3,7 +3,12 @@ using KeiBuild.Ingestion.Parsing;
 
 namespace KeiBuild.Ingestion.Extraction;
 
-public sealed record ExtractionInput(NormalizedDocument Document, IReadOnlyList<string> ChassisCodes, string? Language);
+public sealed record ExtractionInput(NormalizedDocument Document, IReadOnlyList<string> ChassisCodes, string? Language)
+{
+    public SourceProvenance? Provenance { get; init; }
+}
+
+public sealed record SourceProvenance(string Url, string Publisher, Guid VersionId, string Sha256, DateTimeOffset RetrievedAt);
 
 public interface IClaimExtractor
 {

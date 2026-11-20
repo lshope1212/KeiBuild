@@ -15,19 +15,21 @@ namespace KeiBuild.Research.Execution;
 public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchProvider? search,
     IResearchCollector? collector, IKnowledgeExtractor? extractor)
 {
+    private VehicleVariant variant = null!;
     public async Task<ResearchRun> RunAsync(ResearchCampaign campaign, string command, RunLimits limits,
         bool discover, bool work, CancellationToken ct)
     {
         limits.Validate();
+        variant = await db.VehicleVariants.SingleAsync(v => v.Id == campaign.VehicleVariantId, ct);
         await store.RecoverAsync(campaign.Id, limits.Retries, ct);
-        var run = new ResearchRun { CampaignId = campaign.Id, Command = command };
+        var run = new ResearchRun { CampaignId = campaign.Id, Command = command, Provider = extractor?.Name };
         db.Runs.Add(run);
         await db.SaveChangesAsync(ct);
-        var budget = new RunBudget(limits, run, campaign.Mode == CampaignMode.Offline);
+        var budget = new RunBudget(limits, run, campaign.Mode == CampaignMode.Offline, extractor is CodexKnowledgeExtractor);
         var policies = await db.Policies.Where(item => item.CampaignId == campaign.Id).ToListAsync(ct);
-        if (discover && search is not null)
+        if (discover && search is not null && !(campaign.SearchAfter > DateTimeOffset.UtcNow))
             await DiscoverAsync(campaign, limits, run, budget, policies, ct);
-        if (work && collector is not null)
+        if (work && collector is not null && run.StopReason is null && !(campaign.ExtractionAfter > DateTimeOffset.UtcNow))
             await WorkAsync(campaign, limits, run, budget, policies, ct);
         run.EndedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -37,7 +39,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     private async Task DiscoverAsync(ResearchCampaign campaign, RunLimits limits, ResearchRun run,
         RunBudget budget, IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
     {
-        while (budget.CanSearch)
+        while (budget.CanSearch && !await StoppingAsync(campaign.Id, ct))
         {
             var now = DateTimeOffset.UtcNow;
             var query = await db.Queries.Where(item => item.CampaignId == campaign.Id &&
@@ -45,6 +47,8 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                 .OrderBy(item => item.Priority).FirstOrDefaultAsync(ct);
             if (query is null)
                 break;
+            if (campaign.Mode == CampaignMode.Live && campaign.SearchAfter is { } after && after > now)
+                await Task.Delay(after - now, ct);
             budget.ReserveSearch();
             query.State = WorkState.Running;
             query.Attempts++;
@@ -58,15 +62,20 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                     await AddHitAsync(campaign.Id, hit, query, null, policies, linksOnly: false, run, ct);
                 query.State = WorkState.Done;
                 attempt.Returned = hits.Count;
+                if (campaign.Mode == CampaignMode.Live) campaign.SearchAfter = DateTimeOffset.UtcNow.AddSeconds(1);
             }
             catch (IngestionException error)
             {
-                var credentials = error.HttpStatus is 401 or 403;
-                query.State = credentials || error.IsTransient && query.Attempts < limits.Retries
+                var providerHold = error.HttpStatus is 401 or 403 or 429;
+                query.State = providerHold || error.IsTransient && query.Attempts < limits.Retries
                     ? WorkState.Pending : WorkState.Failed;
-                if (credentials)
+                if (providerHold)
                     query.Attempts--;
-                query.DueAt = credentials ? DateTimeOffset.UtcNow : RetryPolicy.Due(query.Attempts, error.RetryAt);
+                query.DueAt = providerHold ? DateTimeOffset.UtcNow : RetryPolicy.Due(query.Attempts, error.RetryAt);
+                if (error.IsTransient || providerHold)
+                    campaign.SearchAfter = RetryPolicy.Due(query.Attempts, error.RetryAt);
+                if (providerHold)
+                    run.StopReason = error.Message;
                 attempt.Error = error.Message;
                 attempt.EndedAt = DateTimeOffset.UtcNow;
                 await db.SaveChangesAsync(ct);
@@ -89,7 +98,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             return;
         var title = BraveSearchProvider.Clean(hit.Title, 200);
         var snippet = BraveSearchProvider.Clean(hit.Snippet, 500);
-        var (kind, relevance) = Relevance.Classify(uri, title, snippet);
+        var (kind, relevance) = Relevance.Classify(uri, title, snippet, variant.Chassis, variant.Engine);
         var existing = db.Resources.Local.FirstOrDefault(item => item.CampaignId == campaign && item.Url == url) ??
             await db.Resources.SingleOrDefaultAsync(item => item.CampaignId == campaign && item.Url == url, ct);
         if (existing is not null)
@@ -99,7 +108,8 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             if (existing.Kind != ResourceKind.Sitemap && relevance > existing.Relevance)
             {
                 if (existing.Relevance == 0)
-                    db.Jobs.Add(new CrawlJob { Resource = existing, State = WorkState.Blocked });
+                    db.Jobs.Add(new CrawlJob { Resource = existing,
+                        State = PolicyRules.Permitted(policies, existing) is null ? WorkState.Blocked : WorkState.Pending });
                 existing.Kind = kind;
                 existing.Relevance = relevance;
                 existing.Title = title;
@@ -123,40 +133,32 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     private async Task WorkAsync(ResearchCampaign campaign, RunLimits limits, ResearchRun run, RunBudget budget,
         IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
     {
-        var jobs = await db.Jobs.Include(job => job.Resource)
-            .Where(job => job.Resource.CampaignId == campaign.Id && job.State != WorkState.Failed).ToListAsync(ct);
         var now = DateTimeOffset.UtcNow;
-        foreach (var job in jobs)
+        if (limits.RefreshHours is { } hours)
         {
-            if (job.State == WorkState.Done && limits.RefreshHours is { } hours &&
-                job.Resource.LastRetrievedAt <= now.AddHours(-hours) && PolicyRules.Permitted(policies, job.Resource) is not null)
-            {
-                job.State = WorkState.Pending;
-                job.Attempts = 0;
-                job.DueAt = now;
-            }
-            if (job.State == WorkState.Blocked && PolicyRules.Permitted(policies, job.Resource) is not null)
-                job.State = WorkState.Pending;
-            if (job.State == WorkState.Pending && PolicyRules.Permitted(policies, job.Resource) is null)
-                job.State = WorkState.Blocked;
+            var cutoff = now.AddHours(-hours);
+            await db.Jobs.Where(j => j.Resource.CampaignId == campaign.Id && j.State == WorkState.Done &&
+                j.Resource.LastRetrievedAt <= cutoff).ExecuteUpdateAsync(u => u.SetProperty(j => j.State, WorkState.Pending)
+                    .SetProperty(j => j.Attempts, 0).SetProperty(j => j.DueAt, now), ct);
         }
-        await db.SaveChangesAsync(ct);
         // A database-wide command lease and one active request per origin bound parallelism.
-        while (budget.CanFetch)
+        while (budget.CanFetch && run.StopReason is null && !await StoppingAsync(campaign.Id, ct))
         {
             now = DateTimeOffset.UtcNow;
+            var canAnalyze = extractor is not null && budget.CanAnalyze;
             var pending = await db.Jobs.Include(job => job.Resource)
                 .Where(job => job.Resource.CampaignId == campaign.Id && job.State == WorkState.Pending &&
-                              job.DueAt <= now && job.Attempts < limits.Retries)
+                              job.DueAt <= now && job.Attempts < limits.Retries && (canAnalyze || job.Resource.Kind == ResourceKind.Sitemap))
                 .OrderByDescending(job => job.Resource.Relevance).ThenBy(job => job.Resource.Url)
-                .ToListAsync(ct);
+                .Take(128).ToListAsync(ct);
+            if (pending.Count == 0) break;
             var isOffline = campaign.Mode == CampaignMode.Offline;
             var originCutoff = now.AddSeconds(-300);
             var liveAttempts = from attempt in db.CrawlAttempts
                                join previousRun in db.Runs on attempt.RunId equals previousRun.Id
                                join previousCampaign in db.Campaigns on previousRun.CampaignId equals previousCampaign.Id
                                join previousJob in db.Jobs on attempt.JobId equals previousJob.Id
-                               where previousCampaign.Mode == CampaignMode.Live && attempt.StartedAt > originCutoff
+                               where previousCampaign.Mode == CampaignMode.Live && (attempt.EndedAt ?? attempt.StartedAt) > originCutoff
                                select new { previousJob.Resource.Host, At = attempt.EndedAt ?? attempt.StartedAt };
             var recent = isOffline ? [] : await liveAttempts
                 .GroupBy(item => item.Host)
@@ -171,8 +173,6 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                     job.State = WorkState.Blocked;
                     continue;
                 }
-                if (job.Resource.Kind != ResourceKind.Sitemap && (extractor is null || !budget.CanAnalyze))
-                    continue;
                 if (!isOffline)
                 {
                     var last = recent.FirstOrDefault(value => value.Host == job.Resource.Host);
@@ -196,18 +196,38 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             }
             await db.SaveChangesAsync(ct);
             if (batch.Count == 0)
-                break;
+                continue; // All selected jobs were blocked or given a later due time.
 
-            var fetched = await Task.WhenAll(batch.Select(item => FetchAsync(item, limits.MaximumBytes, ct)));
+            // Only retained, unprocessed versions under the same current permission can satisfy a retry locally.
+            var resumable = batch.Where(w => w.Policy.AllowSnapshot && w.Job.Resource.Kind != ResourceKind.Sitemap)
+                .Select(w => w.Job.ResourceId).ToArray();
+            var snapshots = await (from v in db.Versions.AsNoTracking() join c in db.Contents on v.ContentId equals c.Id
+                                   join r in db.Resources on v.ResourceId equals r.Id
+                                   where resumable.Contains(v.ResourceId) && v.LastSeenAt == r.LastRetrievedAt && v.ProcessedAt == null &&
+                                       v.Snapshot != null && v.SizeBytes <= limits.MaximumBytes
+                                   orderby v.LastSeenAt descending
+                                   select new { v.ResourceId, v.PolicyId, v.Snapshot, v.RetrievedAt, c.EncodingKey }).ToListAsync(ct);
+            var fetched = await Task.WhenAll(batch.Select(item =>
+            {
+                var saved = snapshots.FirstOrDefault(v => v.ResourceId == item.Job.ResourceId && v.PolicyId == item.Policy.Id);
+                return saved == null ? FetchAsync(item, limits.MaximumBytes, ct) :
+                    Task.FromResult(new FetchResult(new CollectedDocument(saved.Snapshot!, saved.RetrievedAt, saved.EncodingKey), null, true));
+            }));
             for (var i = 0; i < batch.Count; i++)
             {
                 var item = batch[i];
                 var outcome = fetched[i];
-                if (outcome.Error is { } fetchError)
+                if (run.StopReason is not null)
+                {
+                    item.Job.State = WorkState.Pending;
+                    item.Job.Attempts--;
+                    item.Attempt.Error = "Deferred after provider pause.";
+                }
+                else if (outcome.Error is { } fetchError)
                     Fail(item, fetchError, limits, fetched: false);
                 else
                 {
-                    if (!isOffline)
+                    if (!isOffline && !outcome.FromSnapshot)
                         item.Attempt.HttpStatus = 200;
                     try
                     {
@@ -215,6 +235,11 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                     }
                     catch (IngestionException error)
                     {
+                        if (item.Attempt.AiReserved && error.HttpStatus is 401 or 403 or 429)
+                        {
+                            run.StopReason = error.Message;
+                            campaign.ExtractionAfter = RetryPolicy.Due(item.Job.Attempts, error.RetryAt);
+                        }
                         Fail(item, error, limits, fetched: true);
                     }
                 }
@@ -305,10 +330,11 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                 }
                 work.Attempt.AiReserved = true;
                 await db.SaveChangesAsync(ct);
-                var reply = await extractor!.ExtractAsync(new(normalized, [Ha4Plan.Chassis], source.Language), ct);
+                var reply = await extractor!.ExtractAsync(new(normalized, [variant.Chassis], source.Language)
+                { Provenance = new(source.Url, source.Publisher, version.Id, hash, version.RetrievedAt) }, ct);
                 run.InputTokens += reply.InputTokens;
                 run.OutputTokens += reply.OutputTokens;
-                result = await KnowledgeAnalysis.ValidateAsync(reply, source, document, normalized, ct);
+                result = await KnowledgeAnalysis.ValidateAsync(reply, source, document, normalized, ct, variant.Chassis);
                 content.AnalysisJson = JsonSerializer.Serialize(result, CatalogImport.JsonOptions);
                 content.AnalyzedAt = DateTimeOffset.UtcNow;
                 run.WithheldClaims += result.Withheld;
@@ -331,7 +357,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     private async Task SaveClaimAsync(Guid campaign, GroundedFact fact, DocumentVersion version,
         KeiBuild.Ingestion.Sources.SourceDefinition source, ResearchRun run, CancellationToken ct)
     {
-        var group = ClaimIdentity.Group(fact);
+        var group = ClaimIdentity.Group(fact, variant.Chassis);
         var key = ClaimIdentity.Claim(fact, group);
         var claim = db.Claims.Local.FirstOrDefault(item => item.CampaignId == campaign && item.ClaimKey == key) ??
                     await db.Claims.SingleOrDefaultAsync(item => item.CampaignId == campaign && item.ClaimKey == key, ct);
@@ -380,19 +406,22 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     private static void Fail(FetchWork work, IngestionException error, RunLimits limits, bool fetched)
     {
         var job = work.Job;
-        var auth = fetched && error.HttpStatus is 401 or 403;
+        var auth = fetched && error.HttpStatus is 401 or 403 or 429;
         var deferred = !fetched && error is { HttpStatus: null, RetryAt: not null };
         if (auth || deferred)
             job.Attempts--;
         job.State = auth || deferred || error.IsTransient && job.Attempts < limits.Retries
             ? WorkState.Pending : WorkState.Failed;
-        job.DueAt = auth ? DateTimeOffset.UtcNow.AddMinutes(1) : RetryPolicy.Due(job.Attempts, error.RetryAt);
+        job.DueAt = RetryPolicy.Due(job.Attempts, error.RetryAt);
         if (!fetched)
             work.Attempt.HttpStatus = error.HttpStatus;
         work.Attempt.Error = error.Message;
     }
 
+    private Task<bool> StoppingAsync(Guid campaign, CancellationToken ct) =>
+        db.Campaigns.Where(c => c.Id == campaign).Select(c => c.StopRequested).SingleAsync(ct);
+
     private sealed record FetchWork(CrawlJob Job, SourcePolicy Policy, CrawlAttempt Attempt);
-    private sealed record FetchResult(CollectedDocument? Document, IngestionException? Error);
+    private sealed record FetchResult(CollectedDocument? Document, IngestionException? Error, bool FromSnapshot = false);
     private sealed record OriginTiming(string Host, DateTimeOffset At);
 }

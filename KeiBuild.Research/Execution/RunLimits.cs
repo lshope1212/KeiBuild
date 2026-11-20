@@ -7,24 +7,25 @@ namespace KeiBuild.Research.Execution;
 public sealed record RunLimits(int Searches = 8, int Pages = 8, int AiCalls = 4,
     int MaximumBytes = DocumentBytes.MaxBytes, int Concurrency = 1, int Retries = 3,
     decimal BudgetUsd = 0.25m, decimal SearchCostUsd = 0.01m, decimal AiCostUsd = 0.04m,
-    int? RefreshHours = null)
+    int? RefreshHours = null, int ExpansionLimit = 32)
 {
-    public void Validate()
+    public void Validate(bool continuous = false)
     {
-        if (Searches is < 0 or > 50 || Pages is < 0 or > 50 || AiCalls is < 0 or > 20 ||
+        if (Searches < 0 || Searches > (continuous ? 10000 : 50) || Pages < 0 || Pages > (continuous ? 10000 : 50) ||
+            AiCalls < 0 || AiCalls > (continuous ? 10000 : 20) ||
             MaximumBytes is < 1024 or > DocumentBytes.MaxBytes || Concurrency is < 1 or > 4 ||
             Retries is < 1 or > 5 || BudgetUsd is < 0 or > 20 ||
             SearchCostUsd is < 0.000001m or > 20m || AiCostUsd is < 0.000001m or > 20m ||
-            RefreshHours is < 1 or > 8_760)
+            RefreshHours is < 1 or > 8_760 || ExpansionLimit is < 0 or > 500)
             throw new IngestionException("Research limits are out of range. See --help for supported bounds.");
     }
 }
 
-public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline)
+public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline, bool codex = false)
 {
     public bool CanSearch => run.Searches < limits.Searches && CanSpend(limits.SearchCostUsd);
     public bool CanFetch => run.Pages < limits.Pages;
-    public bool CanAnalyze => run.AiCalls < limits.AiCalls && CanSpend(limits.AiCostUsd);
+    public bool CanAnalyze => run.AiCalls < limits.AiCalls && CanSpend(codex ? 0 : limits.AiCostUsd);
 
     public bool ReserveSearch()
     {
@@ -48,7 +49,7 @@ public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline)
         if (!CanAnalyze)
             return false;
         run.AiCalls++;
-        Spend(limits.AiCostUsd);
+        Spend(codex ? 0 : limits.AiCostUsd);
         return true;
     }
 

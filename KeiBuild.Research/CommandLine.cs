@@ -10,20 +10,26 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
     IReadOnlyDictionary<string, string?> Values)
 {
     public const string Help = """
-        KeiBuild.Research — standalone HA4 research with PostgreSQL
+        KeiBuild.Research — standalone vehicle research with PostgreSQL
 
         migrate
         plan [name]
         demo [name]                          Migrate and run the synthetic HA4 campaign
-        start <name> [--offline]
+        start <name> [--offline] [--target-file <target.json>]
         policies <name> --file <policies.json>
         discover <name> | work <name> | run <name> | resume <name>
+        stop <name> | jobs <name> [--offset <n>] | coverage <name>
+        summary <name> --output <new-file.json>
         retry-failed <name>
         status <name> | sources <name> | claims <name> [--offset <n>]
         review <name> --claim <id> --decision approve|reject --note <text>
         export <name> --output <new-file.json> [--offset <n>]
 
         Run controls:
+          --provider codex|openai   Live extraction, default codex (ChatGPT login)
+          --continuous              Alternate small batches, up to 10000 of each request type per session
+          --max-minutes 1..10080    Runtime deadline, default 60
+          --expansion-limit 0..500  Lifetime follow-up query ceiling, default 32
           --dry-run                 Print the HA4 plan and proposed limits without a database or providers
           --search-limit 0..50      Brave requests, default 8
           --page-limit 0..50        Page and sitemap attempts, default 8
@@ -41,15 +47,17 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         """;
 
     private static readonly HashSet<string> Commands =
-        ["migrate", "plan", "demo", "start", "policies", "discover", "work", "run", "resume", "retry-failed", "status", "sources", "claims", "review", "export"];
-    private static readonly HashSet<string> Flags = ["--offline", "--dry-run"];
+        ["stop", "jobs", "coverage", "summary", "migrate", "plan", "demo", "start", "policies", "discover", "work", "run", "resume", "retry-failed", "status", "sources", "claims", "review", "export"];
+    private static readonly HashSet<string> Flags = ["--offline", "--dry-run", "--continuous"];
     private static readonly HashSet<string> RunArguments =
         ["--search-limit", "--page-limit", "--ai-limit", "--max-bytes", "--concurrency", "--retries",
-         "--budget-usd", "--search-cost-usd", "--ai-cost-usd", "--refresh-hours", "--dry-run"];
+         "--budget-usd", "--search-cost-usd", "--ai-cost-usd", "--refresh-hours", "--dry-run", "--provider", "--continuous", "--max-minutes", "--expansion-limit"];
 
     public bool Has(string flag) => Values.ContainsKey(flag);
     public string? Get(string key) => Values.GetValueOrDefault(key);
     public string Need(string key) => Get(key) ?? throw new IngestionException($"Specify {key}.");
+    public string Provider => Get("--provider") ?? "codex";
+    public int MaxMinutes => Integer(Get("--max-minutes"), "--max-minutes", 60, 1, 10080);
     public int Offset => Integer(Get("--offset"), "--offset", 0, 0, int.MaxValue);
 
     public static CommandLine Parse(string[] args)
@@ -73,10 +81,12 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
             var option = args[index++];
             var allow = name switch
             {
+                "plan" when option == "--target-file" => true,
                 "plan" or "demo" or "discover" or "work" or "run" or "resume" => RunArguments.Contains(option),
-                "start" => option == "--offline",
+                "start" => option is "--offline" or "--target-file",
                 "policies" => option == "--file",
-                "claims" or "sources" => option == "--offset",
+                "summary" => option == "--output",
+                "jobs" or "claims" or "sources" => option == "--offset",
                 "review" => option is "--claim" or "--decision" or "--note",
                 "export" => option is "--output" or "--offset",
                 _ => false
@@ -99,10 +109,16 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         var limits = new RunLimits(Number("--search-limit", name == "demo" ? 14 : 8), Number("--page-limit", 8),
             Number("--ai-limit", name == "demo" ? 8 : 4), Number("--max-bytes", 524288), Number("--concurrency", 1),
             Number("--retries", 3), Money("--budget-usd", .25m), Money("--search-cost-usd", .01m), Money("--ai-cost-usd", .04m),
-            values.ContainsKey("--refresh-hours") ? Number("--refresh-hours", 0) : null);
-        limits.Validate();
+            values.ContainsKey("--refresh-hours") ? Number("--refresh-hours", 0) : null, Number("--expansion-limit", 32));
+        limits.Validate(values.ContainsKey("--continuous"));
         var mode = name == "demo" || values.ContainsKey("--offline") ? CampaignMode.Offline : CampaignMode.Live;
-        return new CommandLine(name, campaign, mode, limits, values);
+        var command = new CommandLine(name, campaign, mode, limits, values);
+        if (command.Provider is not ("codex" or "openai"))
+            throw new IngestionException("Choose --provider codex or openai.");
+        _ = command.MaxMinutes;
+        if (mode == CampaignMode.Offline && values.ContainsKey("--target-file"))
+            throw new IngestionException("Offline fixtures cover the default HA4 target.");
+        return command;
     }
 
     private static int Integer(string? raw, string key, int fallback, int minimum, int maximum) =>
