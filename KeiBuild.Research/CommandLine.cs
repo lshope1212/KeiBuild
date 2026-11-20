@@ -16,6 +16,8 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         plan [name]
         demo [name]                          Migrate and run the synthetic HA4 campaign
         start <name> [--offline] [--target-file <target.json>]
+        source-review <name> [--offset <n>]
+        approve-source <name> --scope <HTTPS path ending in /> --publisher <name> --basis <documented terms> [--format html|markdown|text]
         policies <name> --file <policies.json>
         discover <name> | work <name> | run <name> | resume <name>
         stop <name> | jobs <name> [--offset <n>] | coverage <name>
@@ -26,12 +28,13 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         export <name> --output <new-file.json> [--offset <n>]
 
         Run controls:
+          --search-provider codex|brave|crossref  Live discovery, default codex (ChatGPT login)
           --provider codex|openai   Live extraction, default codex (ChatGPT login)
           --continuous              Alternate small batches, up to 10000 of each request type per session
           --max-minutes 1..10080    Runtime deadline, default 60
           --expansion-limit 0..500  Lifetime follow-up query ceiling, default 32
           --dry-run                 Print the HA4 plan and proposed limits without a database or providers
-          --search-limit 0..50      Brave requests, default 8
+          --search-limit 0..50      Discovery requests, default 8
           --page-limit 0..50        Page and sitemap attempts, default 8
           --ai-limit 0..20          Extraction requests, default 4
           --max-bytes 1024..524288  Document byte limit, default 524288
@@ -47,15 +50,16 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         """;
 
     private static readonly HashSet<string> Commands =
-        ["stop", "jobs", "coverage", "summary", "migrate", "plan", "demo", "start", "policies", "discover", "work", "run", "resume", "retry-failed", "status", "sources", "claims", "review", "export"];
+        ["approve-source", "source-review", "stop", "jobs", "coverage", "summary", "migrate", "plan", "demo", "start", "policies", "discover", "work", "run", "resume", "retry-failed", "status", "sources", "claims", "review", "export"];
     private static readonly HashSet<string> Flags = ["--offline", "--dry-run", "--continuous"];
     private static readonly HashSet<string> RunArguments =
         ["--search-limit", "--page-limit", "--ai-limit", "--max-bytes", "--concurrency", "--retries",
-         "--budget-usd", "--search-cost-usd", "--ai-cost-usd", "--refresh-hours", "--dry-run", "--provider", "--continuous", "--max-minutes", "--expansion-limit"];
+         "--budget-usd", "--search-cost-usd", "--ai-cost-usd", "--refresh-hours", "--dry-run", "--provider", "--search-provider", "--continuous", "--max-minutes", "--expansion-limit"];
 
     public bool Has(string flag) => Values.ContainsKey(flag);
     public string? Get(string key) => Values.GetValueOrDefault(key);
     public string Need(string key) => Get(key) ?? throw new IngestionException($"Specify {key}.");
+    public string SearchProvider => Get("--search-provider") ?? "codex";
     public string Provider => Get("--provider") ?? "codex";
     public int MaxMinutes => Integer(Get("--max-minutes"), "--max-minutes", 60, 1, 10080);
     public int Offset => Integer(Get("--offset"), "--offset", 0, 0, int.MaxValue);
@@ -84,9 +88,10 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
                 "plan" when option == "--target-file" => true,
                 "plan" or "demo" or "discover" or "work" or "run" or "resume" => RunArguments.Contains(option),
                 "start" => option is "--offline" or "--target-file",
+                "approve-source" => option is "--scope" or "--publisher" or "--basis" or "--format",
                 "policies" => option == "--file",
                 "summary" => option == "--output",
-                "jobs" or "claims" or "sources" => option == "--offset",
+                "jobs" or "claims" or "sources" or "source-review" => option == "--offset",
                 "review" => option is "--claim" or "--decision" or "--note",
                 "export" => option is "--output" or "--offset",
                 _ => false
@@ -113,6 +118,8 @@ internal sealed record CommandLine(string Command, string Campaign, CampaignMode
         limits.Validate(values.ContainsKey("--continuous"));
         var mode = name == "demo" || values.ContainsKey("--offline") ? CampaignMode.Offline : CampaignMode.Live;
         var command = new CommandLine(name, campaign, mode, limits, values);
+        if (command.SearchProvider is not ("codex" or "brave" or "crossref"))
+            throw new IngestionException("Choose --search-provider codex, brave or crossref.");
         if (command.Provider is not ("codex" or "openai"))
             throw new IngestionException("Choose --provider codex or openai.");
         _ = command.MaxMinutes;

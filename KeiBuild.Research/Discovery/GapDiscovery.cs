@@ -23,7 +23,7 @@ internal static class GapDiscovery
     {
         if (limit == 0) return;
         var queries = db.Queries.Where(q => q.CampaignId == campaign);
-        var remaining = limit - await queries.CountAsync(q => q.OriginClaimId != null, ct);
+        var remaining = limit - await queries.CountAsync(q => q.GapReason != null, ct);
         if (remaining <= 0) return;
         var topics = await db.Topics.Where(t => t.CampaignId == campaign).ToDictionaryAsync(t => t.Key, t => t.Id, ct);
         var claims = db.Claims.AsNoTracking().Where(c => c.CampaignId == campaign && c.State != Decision.Rejected);

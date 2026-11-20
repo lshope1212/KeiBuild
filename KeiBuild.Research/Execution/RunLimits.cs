@@ -21,9 +21,9 @@ public sealed record RunLimits(int Searches = 8, int Pages = 8, int AiCalls = 4,
     }
 }
 
-public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline, bool codex = false)
+public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline, bool codex = false, bool freeSearch = false)
 {
-    public bool CanSearch => run.Searches < limits.Searches && CanSpend(limits.SearchCostUsd);
+    public bool CanSearch => run.Searches < limits.Searches && CanSpend(freeSearch ? 0 : limits.SearchCostUsd);
     public bool CanFetch => run.Pages < limits.Pages;
     public bool CanAnalyze => run.AiCalls < limits.AiCalls && CanSpend(codex ? 0 : limits.AiCostUsd);
 
@@ -32,7 +32,7 @@ public sealed class RunBudget(RunLimits limits, ResearchRun run, bool offline, b
         if (!CanSearch)
             return false;
         run.Searches++;
-        Spend(limits.SearchCostUsd);
+        Spend(freeSearch ? 0 : limits.SearchCostUsd);
         return true;
     }
 

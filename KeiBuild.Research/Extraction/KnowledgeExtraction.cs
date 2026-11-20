@@ -99,6 +99,10 @@ internal static class KnowledgePrompt
         that range and carry the attribute, the value and its unit together. The passage must mention
         the target chassis explicitly. Include any engine, dates, chassis-number ranges, drive, transmission, trim
         and exclusions in the passage; copy the stated scope in applicability when present.
+        For Japanese chassis identity lists of the form 型式は<configuration>が「<code>」…である。,
+        use VehicleSpecification, subject = the exact configuration (omit 同じく), attribute = 型式,
+        value = the target chassis code, and cite just that line. Leave unstated fields null.
+        For other facts choose explicitly labeled fields using a colon or equals sign.
         Use type PartCrossReference or Supersession only when the passage explicitly says so.
         Keep contradictory values with their original scope. Omit unsupported items.
 
@@ -157,7 +161,7 @@ public sealed record GroundedFact(FactKind Kind, string Subject, string Attribut
     string? Manufacturer, string? PartNumber, string? RelatedPartNumber, string? Applicability,
     string Locator, string Passage, string? EnglishTranslation, FitmentEntry? Fitment = null);
 
-public sealed record AnalysisResult(IReadOnlyList<GroundedFact> Facts, int Withheld, int Duplicates = 0);
+public sealed record AnalysisResult(IReadOnlyList<GroundedFact> Facts, int Withheld, int Duplicates = 0, int ProofRevision = 0);
 
 public static partial class FactEvidence
 {
@@ -178,6 +182,7 @@ public static partial class FactEvidence
             !Literal(passage, draft.Subject) || !Literal(passage, draft.Manufacturer) ||
             !Literal(passage, draft.PartNumber) || !Literal(passage, draft.RelatedPartNumber) ||
             !Literal(passage, draft.Applicability) ||
+            !JapaneseChassisAssignment(draft, factLine, chassis) &&
             !factLine.Split('|', ';').Any(clause => SameField(clause, draft.Attribute, draft.Value, draft.Unit)))
             return null;
 
@@ -198,6 +203,23 @@ public static partial class FactEvidence
             draft.Applicability?.Trim(), $"Normalized lines {draft.FirstLine}–{draft.LastLine} (fact line {draft.FactLine})",
             passage, draft.EnglishTranslation?.Trim());
     }
+
+    private static bool JapaneseChassisAssignment(FactDraft draft, string line, string chassis)
+    {
+        if (draft.Kind != FactKind.VehicleSpecification || draft.Attribute != "型式" || draft.Value != chassis ||
+            draft.FirstLine != draft.LastLine || draft.Unit != null || draft.Manufacturer != null ||
+            draft.PartNumber != null || draft.RelatedPartNumber != null ||
+            draft.Applicability != null && draft.Applicability != draft.Subject) return false;
+
+        var match = ChassisList().Match(line);
+        if (!match.Success) return false;
+        return match.Groups["config"].Captures.Zip(match.Groups["code"].Captures)
+            .Any(pair => pair.First.Value == draft.Subject && pair.Second.Value == chassis);
+    }
+
+    // Match the entire affirmative sentence. Each configuration must bind to its own quoted chassis.
+    [GeneratedRegex(@"\A型式は(?:(?:同じく)?(?<config>(?:トラック|バン)の(?:2WD|4WD))が「(?<code>[A-Z0-9-]{2,16})」、)*(?:同じく)?(?<config>(?:トラック|バン)の(?:2WD|4WD))が「(?<code>[A-Z0-9-]{2,16})」である。\z")]
+    private static partial Regex ChassisList();
 
     private static bool SameField(string line, string attribute, string value, string? unit)
     {

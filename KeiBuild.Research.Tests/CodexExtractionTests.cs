@@ -6,7 +6,7 @@ using KeiBuild.Ingestion.Extraction;
 using KeiBuild.Ingestion.Parsing;
 using KeiBuild.Ingestion.Sources;
 using KeiBuild.Research.Extraction;
-using static KeiBuild.Research.Extraction.CodexKnowledgeExtractor;
+using static KeiBuild.Research.Extraction.CodexCli;
 
 namespace KeiBuild.Research.Tests;
 
@@ -39,6 +39,7 @@ public sealed class CodexExtractionTests
             Assert.DoesNotContain("OPENAI_API_KEY", info.Environment.Keys);
             if (OperatingSystem.IsWindows()) Assert.Contains("windows.sandbox=\"mxc\"", info.ArgumentList);
             Assert.Contains("model_provider=\"openai\"", info.ArgumentList);
+            Assert.Contains("web_search=\"disabled\"", info.ArgumentList);
             Assert.Contains("forced_login_method=\"chatgpt\"", info.ArgumentList);
             Assert.Contains("permissions.extract.network.enabled=false", info.ArgumentList);
             Assert.Contains("--ignore-user-config", info.ArgumentList);
@@ -100,14 +101,14 @@ public sealed class CodexExtractionTests
             info.ArgumentList.Add(OperatingSystem.IsWindows() ? windows : posix);
             return info;
         }
-        var result = await CodexKnowledgeExtractor.RunProcessAsync(Child(
+        var result = await CodexCli.RunProcessAsync(Child(
             "[Console]::Write([Console]::In.ReadToEnd()); [Console]::Error.Write('diagnostic'); exit 7",
             "cat; printf diagnostic >&2; exit 7"), "fake document", CancellationToken.None);
         Assert.Equal("fake document", result.Output);
         Assert.Equal("diagnostic", result.Error);
         Assert.Equal(7, result.Code);
         using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CodexKnowledgeExtractor.RunProcessAsync(
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CodexCli.RunProcessAsync(
             Child("Start-Sleep -Seconds 15", "sleep 15"), "", cancel.Token).WaitAsync(TimeSpan.FromSeconds(8)));
     }
 

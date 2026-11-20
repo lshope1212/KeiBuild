@@ -25,6 +25,80 @@ public sealed class PostgreSqlTests
     private static readonly RunLimits Limits = new(Searches: 14, Pages: 8, AiCalls: 8, Concurrency: 2);
 
     [PostgreSqlFact]
+    public async Task CodexDiscoveryQuotaAndInterruptionPreservePendingQuery()
+    {
+        await using var db = Create();
+        await db.Database.MigrateAsync(Ct);
+        var store = new CampaignStore(db);
+        await using var lease = await store.LockAsync(Ct);
+        var campaign = await store.StartAsync("pause-" + Guid.NewGuid().ToString("N"), CampaignMode.Live, Ct);
+        var limits = Limits with { Searches = 1, BudgetUsd = 0 };
+        using var shutdown = new CancellationTokenSource();
+        var interrupted = false;
+        var provider = new CodexDiscoveryProvider(new CodexCli((info, _, _) =>
+        {
+            if (info.ArgumentList.First() == "login") return Task.FromResult(new CodexCli.CodexExit(0, "Logged in using ChatGPT", ""));
+            if (interrupted)
+            {
+                shutdown.Cancel();
+                shutdown.Token.ThrowIfCancellationRequested();
+            }
+            return Task.FromResult(new CodexCli.CodexExit(1, "", "usage limit reached"));
+        }));
+        var runner = new CampaignRunner(db, store, provider, null, null);
+        var paused = await runner.RunAsync(campaign, "discover", limits, true, false, Ct);
+        Assert.Contains("usage limit", paused.StopReason);
+        var attempt = await db.SearchAttempts.SingleAsync(a => a.RunId == paused.Id, Ct);
+        var query = await db.Queries.SingleAsync(q => q.Id == attempt.QueryId, Ct);
+        Assert.Equal(WorkState.Pending, query.State);
+        Assert.Equal(0, query.Attempts);
+        Assert.True(campaign.SearchAfter > DateTimeOffset.UtcNow);
+        interrupted = true;
+        campaign.SearchAfter = null;
+        await db.SaveChangesAsync(Ct);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => runner.RunAsync(campaign, "resume", limits, true, false, shutdown.Token));
+        await store.RecoverAsync(campaign.Id, limits.Retries, Ct);
+        Assert.Equal(WorkState.Pending, query.State);
+        Assert.Equal(0, query.Attempts);
+        Assert.True(await db.SearchAttempts.AnyAsync(a => a.QueryId == query.Id && a.Error!.Contains("Interrupted"), Ct));
+    }
+
+    [PostgreSqlFact]
+    public async Task VerifiedCodexLeadsEnterPolicyCollectionAndEvidencePipeline()
+    {
+        await using var db = Create();
+        await db.Database.MigrateAsync(Ct);
+        var store = new CampaignStore(db);
+        await using var lease = await store.LockAsync(Ct);
+        var campaign = await store.StartAsync("codex-" + Guid.NewGuid().ToString("N"), CampaignMode.Live, Ct);
+        await store.ApplyPoliciesAsync(campaign, [FakeResearch.Policy with { SitemapUrl = null, ExploreLinks = false }], Ct);
+        var provider = CodexDiscoveryTests.Mock(CodexDiscoveryTests.Event(
+            ("turn0search0", FakeResearch.Scope + "manual", "HA4 technical manual"),
+            ("turn0search1", "https://unapproved.example/ha4", "HA4 manual")), new
+        {
+            leads = new[] { CodexDiscoveryTests.Lead("turn0search0"), CodexDiscoveryTests.Lead("turn0search1") },
+            proposals = new[] { new { text = "HA4 純正部品 品番 ブレーキ", language = "ja", category = "brakes", reason = "Missing OEM brake identifiers." } }
+        });
+        var fake = new FakeResearch();
+        var runner = new CampaignRunner(db, store, provider, fake, fake);
+        var limits = Limits with { Searches = 1, Pages = 1, AiCalls = 1, BudgetUsd = .10m, ExpansionLimit = 1 };
+        var run = await runner.RunAsync(campaign, "run", limits, true, true, Ct);
+        Assert.Equal("codex", run.DiscoveryProvider);
+        Assert.Equal(17, run.DiscoveryInputTokens);
+        Assert.Equal(0, run.InputTokens);
+        Assert.Equal(1, run.AiCalls);
+        var saved = await db.SearchAttempts.SingleAsync(a => a.RunId == run.Id, Ct);
+        Assert.Contains("turn0search0", saved.CitationsJson);
+        Assert.True(await db.Jobs.AnyAsync(j => j.State == WorkState.Blocked && j.Resource.CampaignId == campaign.Id, Ct));
+        Assert.True(await db.Evidence.AnyAsync(e => db.Resources.Any(r => r.CampaignId == campaign.Id &&
+            r.Id == e.Version.ResourceId && r.Url == FakeResearch.Scope + "manual") && e.Passage.Contains("21 mm"), Ct));
+        await GapDiscovery.ExpandAsync(db, campaign.Id, "HA4", 1, Ct);
+        Assert.Equal(1, await db.Queries.CountAsync(q => q.CampaignId == campaign.Id && q.GapReason != null, Ct));
+        Assert.True(await db.Queries.AnyAsync(q => q.CampaignId == campaign.Id && q.DiscoveryProvider == "codex" &&
+            q.Language == "ja" && q.GapReason == "Missing OEM brake identifiers.", Ct));
+    }
+
+    [PostgreSqlFact]
     public async Task MigrationsAndOfflineCampaignPersistProvenanceDuplicatesAndConflictsAcrossSessions()
     {
         var fake = new FakeResearch();
@@ -73,6 +147,52 @@ public sealed class PostgreSqlTests
             Assert.Equal(0, resumed.AiCalls);
             Assert.Equal(8, await db.Claims.CountAsync(row => row.CampaignId == campaignId, Ct));
             await Assert.ThrowsAsync<IngestionException>(() => store.ExportAsync(campaign, "unused.json", 0, Ct));
+        }
+    }
+
+    [PostgreSqlFact]
+    public async Task PublisherHeadersPromoteOnlyTheAssessedUrlAndDenialSurvivesResume()
+    {
+        await using var db = Create();
+        await db.Database.MigrateAsync(Ct);
+        var store = new CampaignStore(db);
+        await using var lease = await store.LockAsync(Ct);
+        var name = "policy-" + Guid.NewGuid().ToString("N");
+        var campaign = await store.StartAsync(name, CampaignMode.Live, Ct);
+        var resource = new DiscoveredResource { CampaignId = campaign.Id, Url = "https://technical.publisher.org/ha4",
+            Host = "technical.publisher.org", Kind = ResourceKind.Technical, Relevance = 85, Assessment = PublisherHeaders.Missing };
+        db.Jobs.Add(new CrawlJob { Resource = resource, State = WorkState.Blocked });
+        await db.SaveChangesAsync(Ct);
+        using var client = new HttpClient(new HeaderPublisher());
+        var state = Directory.CreateTempSubdirectory("keibuild-policy-test-");
+        try
+        {
+            var http = new KeiBuild.Research.Collection.ResearchHttpCollector(new(client, state.FullName));
+            var runner = new CampaignRunner(db, store, null, http, null);
+            var run = await runner.RunAsync(campaign, "test", Limits with { Pages = 1 }, false, true, Ct);
+            Assert.Equal(1, run.Pages);
+            var policy = await db.Policies.SingleAsync(p => p.CampaignId == campaign.Id, Ct);
+            Assert.Equal(resource.Url, policy.Scope);
+            Assert.False(policy.Prefix);
+            Assert.False(policy.AllowSnapshot);
+            Assert.Equal(WorkState.Pending, (await db.Jobs.SingleAsync(j => j.ResourceId == resource.Id, Ct)).State);
+            await store.ApplyPoliciesAsync(campaign, [ResearchUnitTests.Allowed("https://technical.publisher.org/") with { AllowAi = false }], Ct);
+            Assert.Equal(WorkState.Blocked, (await db.Jobs.SingleAsync(j => j.ResourceId == resource.Id, Ct)).State);
+        }
+        finally { state.Delete(true); }
+    }
+
+    private sealed class HeaderPublisher : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath == "/robots.txt")
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+            Assert.Equal(HttpMethod.Head, request.Method);
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("") };
+            response.Headers.TryAddWithoutValidation("TDM-Reservation", "0");
+            response.Headers.TryAddWithoutValidation("Link", "<https://creativecommons.org/publicdomain/zero/1.0/>; rel=license");
+            return Task.FromResult(response);
         }
     }
 

@@ -204,11 +204,26 @@ namespace KeiBuild.Research.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("AccessHold")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Assessment")
+                        .HasColumnType("text");
+
                     b.Property<Guid>("CampaignId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTimeOffset>("DiscoveredAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DiscoveryCategory")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DiscoveryObservation")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DiscoveryReason")
+                        .HasColumnType("text");
 
                     b.Property<string>("Host")
                         .IsRequired()
@@ -225,6 +240,9 @@ namespace KeiBuild.Research.Data.Migrations
 
                     b.Property<Guid?>("ParentId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("Publisher")
+                        .HasColumnType("text");
 
                     b.Property<int>("Relevance")
                         .HasColumnType("integer");
@@ -494,6 +512,15 @@ namespace KeiBuild.Research.Data.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<long>("DiscoveryInputTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("DiscoveryOutputTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("DiscoveryProvider")
+                        .HasColumnType("text");
+
                     b.Property<int>("DuplicateClaims")
                         .HasColumnType("integer");
 
@@ -598,6 +625,9 @@ namespace KeiBuild.Research.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("CitationsJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<DateTimeOffset?>("EndedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -636,6 +666,9 @@ namespace KeiBuild.Research.Data.Migrations
 
                     b.Property<Guid>("CampaignId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("DiscoveryProvider")
+                        .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("DueAt")
                         .HasColumnType("timestamp with time zone");

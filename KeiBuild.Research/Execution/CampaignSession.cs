@@ -16,11 +16,25 @@ internal sealed class CampaignSession(ResearchDb db, CampaignRunner runner, IKno
         var remaining = command.Limits;
         var chassis = await db.VehicleVariants.Where(v => v.Id == campaign.VehicleVariantId).Select(v => v.Chassis).SingleAsync(token);
         await db.Campaigns.Where(c => c.Id == campaign.Id).ExecuteUpdateAsync(u => u.SetProperty(c => c.StopRequested, false), token);
-        Console.Error.WriteLine($"Campaign {campaign.Name}, extraction {extractor?.Name ?? "disabled"}, runtime limit {command.MaxMinutes} minutes.");
+        Console.Error.WriteLine($"Campaign {campaign.Name}, discovery {runner.SearchProvider ?? "disabled"}, extraction {extractor?.Name ?? "disabled"}, runtime limit {command.MaxMinutes} minutes.");
         try
         {
+            if (campaign.Mode == CampaignMode.Live && discover)
+                await new CampaignStore(db).EnsureDiscoveryAsync(campaign, await db.VehicleVariants.SingleAsync(v => v.Id == campaign.VehicleVariantId, token), token, seedSources: runner.SearchProvider != "codex");
             if (work)
             {
+                // Revisit legacy Japanese versions with no validated findings once under the newer proof rules.
+                if (campaign.Mode == CampaignMode.Live)
+                {
+                    var outdated = from v in db.Versions join c in db.Contents on v.ContentId equals c.Id
+                                   join r in db.Resources on v.ResourceId equals r.Id
+                                   where r.CampaignId == campaign.Id && v.LastSeenAt == r.LastRetrievedAt &&
+                                       v.Language == "ja" && c.AnalysisJson != null && !EF.Functions.JsonExists(c.AnalysisJson, "proofRevision") &&
+                                       !db.Evidence.Any(e => e.VersionId == v.Id)
+                                   select r.Id;
+                    await db.Jobs.Where(j => j.State == WorkState.Done && outdated.Contains(j.ResourceId))
+                        .ExecuteUpdateAsync(u => u.SetProperty(j => j.State, WorkState.Pending).SetProperty(j => j.DueAt, DateTimeOffset.UtcNow), token);
+                }
                 var policies = await db.Policies.Where(p => p.CampaignId == campaign.Id).ToListAsync(token);
                 await new CampaignStore(db).ReconcilePoliciesAsync(campaign.Id, policies, token);
             }
@@ -65,19 +79,19 @@ internal sealed class CampaignSession(ResearchDb db, CampaignRunner runner, IKno
 
     private async Task<DateTimeOffset?> NextDueAsync(ResearchCampaign campaign, RunLimits limits, bool discover, bool work, CancellationToken ct)
     {
-        var budget = new RunBudget(limits, new(), campaign.Mode == CampaignMode.Offline, extractor is CodexKnowledgeExtractor);
+        var budget = new RunBudget(limits, new(), campaign.Mode == CampaignMode.Offline, extractor is CodexKnowledgeExtractor, runner.NoSearchCharge);
         var due = new List<DateTimeOffset>(2);
         if (discover && budget.CanSearch)
         {
-            var search = await db.Queries.Where(q => q.CampaignId == campaign.Id && q.State == WorkState.Pending &&
-                q.Attempts < limits.Retries).MinAsync(q => (DateTimeOffset?)q.DueAt, ct);
+            var search = await runner.Queue(campaign.Id).Where(q => q.State == WorkState.Pending && q.Attempts < limits.Retries).MinAsync(q => (DateTimeOffset?)q.DueAt, ct);
             if (search.HasValue) due.Add(campaign.SearchAfter > search ? campaign.SearchAfter.Value : search.Value);
         }
         if (work && budget.CanFetch)
         {
             var analyze = extractor is not null && budget.CanAnalyze;
-            var crawl = await db.Jobs.Where(j => j.Resource.CampaignId == campaign.Id && j.State == WorkState.Pending &&
-                j.Attempts < limits.Retries && (analyze || j.Resource.Kind == ResourceKind.Sitemap))
+            var crawl = await db.Jobs.Where(j => j.Resource.CampaignId == campaign.Id && j.Attempts < limits.Retries &&
+                (j.State == WorkState.Pending && (analyze || j.Resource.Kind == ResourceKind.Sitemap) ||
+                 campaign.Mode == CampaignMode.Live && j.State == WorkState.Blocked && j.Resource.Assessment == PublisherHeaders.Missing))
                 .MinAsync(j => (DateTimeOffset?)j.DueAt, ct);
             if (crawl.HasValue) due.Add(campaign.ExtractionAfter > crawl ? campaign.ExtractionAfter.Value : crawl.Value);
         }

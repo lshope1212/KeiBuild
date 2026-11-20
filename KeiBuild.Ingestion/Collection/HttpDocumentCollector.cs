@@ -8,7 +8,7 @@ using KeiBuild.Ingestion.Sources;
 namespace KeiBuild.Ingestion.Collection;
 
 public sealed record HttpCollectionOptions(int MaximumDocumentBytes = DocumentBytes.MaxBytes,
-    int OriginDelaySeconds = 10, bool Sitemap = false);
+    int OriginDelaySeconds = 10, bool Sitemap = false, Action<HttpResponseMessage>? CheckHeaders = null);
 
 public sealed class HttpDocumentCollector(HttpClient client, string stateDirectory)
 {
@@ -34,10 +34,29 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
         var uri = source.Validate();
         if (!source.AutomatedRetrievalApproved)
             throw new IngestionException("Automated retrieval is not approved in the source registry. Use a permitted local file.");
+        return await WithRobotsAsync(uri, options.OriginDelaySeconds, async () =>
+            (await DownloadAsync(uri, source.Format, options, ct))!, ct);
+    }
+
+    public Task<byte[]> ReadPublisherJsonAsync(Uri uri, CancellationToken ct) =>
+        WithRobotsAsync(uri, 10, () => RequestAsync(uri, HttpMethod.Get, "publisher API", false, async (response, token) =>
+        {
+            if (response.Content.Headers.ContentType?.MediaType != "application/json")
+                throw new IngestionException("The publisher API returned an unexpected content type.");
+            await using var stream = await response.Content.ReadAsStreamAsync(token);
+            return await DocumentBytes.ReadAsync(stream, token);
+        }, ct), ct);
+
+    public Task<T> InspectHeadersAsync<T>(Uri uri, Func<HttpResponseMessage, T> inspect, CancellationToken ct) =>
+        WithRobotsAsync(uri, 10, () => RequestAsync(uri, HttpMethod.Head, "source metadata", false,
+            (response, _) => Task.FromResult(inspect(response)), ct), ct);
+
+    private async Task<T> WithRobotsAsync<T>(Uri uri, int delaySeconds, Func<Task<T>> operation, CancellationToken ct)
+    {
         ValidatePublicUrl(uri);
 
         using var rateFile = LockOrigin(uri.IdnHost);
-        var cooldown = TimeSpan.FromSeconds(options.OriginDelaySeconds);
+        var cooldown = TimeSpan.FromSeconds(delaySeconds);
         DateTimeOffset? retryAt = null;
         RecordNextAllowed(rateFile, DateTimeOffset.UtcNow + cooldown);
         try
@@ -49,7 +68,7 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
             if (delay > cooldown)
                 cooldown = delay;
             await Task.Delay(delay, ct);
-            return (await DownloadAsync(uri, source.Format, options, ct))!;
+            return await operation();
         }
         catch (IngestionException error)
         {
@@ -67,15 +86,34 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
         HttpCollectionOptions options, CancellationToken ct)
     {
         var resource = format is null ? "robots.txt" : "source document";
+        return await RequestAsync<CollectedDocument?>(url, HttpMethod.Get, resource, format is null, async (response, token) =>
+        {
+            options.CheckHeaders?.Invoke(response);
+            var header = response.Content.Headers.ContentType;
+            var mediaType = header?.MediaType?.ToLowerInvariant();
+            if (options.Sitemap ? mediaType is not ("text/xml" or "application/xml") : !MatchesFormat(mediaType, format))
+                throw new IngestionException($"The {resource} returned an unexpected content type.") { RequiresSourceReview = true };
+            if (response.Content.Headers.ContentLength > options.MaximumDocumentBytes)
+                throw DocumentBytes.SizeError(options.MaximumDocumentBytes);
+
+            await using var stream = await response.Content.ReadAsStreamAsync(token);
+            var bytes = await DocumentBytes.ReadAsync(stream, token, options.MaximumDocumentBytes);
+            return new CollectedDocument(bytes, DateTimeOffset.UtcNow, header?.CharSet, RetrievedFromUrl: true);
+        }, ct);
+    }
+
+    private async Task<T> RequestAsync<T>(Uri url, HttpMethod method, string resource, bool allowMissing,
+        Func<HttpResponseMessage, CancellationToken, Task<T>> read, CancellationToken ct)
+    {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(RequestTimeout);
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd($"{RobotsRules.ProductToken}/1.0");
+            using var request = new HttpRequestMessage(method, url);
+            request.Headers.UserAgent.ParseAdd($"{RobotsRules.ProductToken}/1.0 (+https://github.com/lshope1212/KeiBuild)");
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            if (format is null && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
-                return null;
+            if (allowMissing && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+                return default!;
             if (response.StatusCode != HttpStatusCode.OK)
             {
                 var status = (int)response.StatusCode;
@@ -83,21 +121,13 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
                 throw new IngestionException($"The {resource} returned HTTP {status}. Use a permitted local document or update the approved URL after checking the source.")
                 {
                     HttpStatus = status,
+                    RequiresSourceReview = status is 401 or 403 or 451 or >= 300 and <= 399,
                     IsTransient = status is 408 or 429 or >= 500,
                     RetryAt = retry?.Date ?? (retry?.Delta is { } delta ? DateTimeOffset.UtcNow + delta : null)
                 };
             }
 
-            var header = response.Content.Headers.ContentType;
-            var mediaType = header?.MediaType?.ToLowerInvariant();
-            if (options.Sitemap ? mediaType is not ("text/xml" or "application/xml") : !MatchesFormat(mediaType, format))
-                throw new IngestionException($"The {resource} returned an unexpected content type.");
-            if (response.Content.Headers.ContentLength > options.MaximumDocumentBytes)
-                throw DocumentBytes.SizeError(options.MaximumDocumentBytes);
-
-            await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
-            var bytes = await DocumentBytes.ReadAsync(stream, deadline.Token, options.MaximumDocumentBytes);
-            return new CollectedDocument(bytes, DateTimeOffset.UtcNow, header?.CharSet, RetrievedFromUrl: true);
+            return await read(response, deadline.Token);
         }
         catch (OperationCanceledException error) when (!ct.IsCancellationRequested)
         {
@@ -123,7 +153,7 @@ public sealed class HttpDocumentCollector(HttpClient client, string stateDirecto
     private static void ValidatePublicUrl(Uri uri)
     {
         var host = uri.IdnHost.TrimEnd('.');
-        if (uri.Scheme != "https" || !uri.IsDefaultPort || uri.Fragment.Length > 0 ||
+        if (uri.Scheme != "https" || !uri.IsDefaultPort || uri.Fragment.Length > 0 || uri.UserInfo.Length > 0 ||
             uri.HostNameType != UriHostNameType.Dns || !host.Contains('.') ||
             new[] { ".local", ".localhost", ".internal", ".test", ".example", ".invalid", ".onion" }
                 .Any(suffix => host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))

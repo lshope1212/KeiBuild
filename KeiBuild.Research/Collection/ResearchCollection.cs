@@ -18,8 +18,16 @@ public sealed class ResearchHttpCollector(HttpDocumentCollector collector) : IRe
     public Task<CollectedDocument> FetchAsync(DiscoveredResource resource, SourcePolicy policy, int maximumBytes, CancellationToken ct)
     {
         var source = Source(resource, policy);
-        return collector.CollectAsync(source, new(maximumBytes, policy.DelaySeconds, resource.Kind == ResourceKind.Sitemap), ct);
+        return collector.CollectAsync(source, new(maximumBytes, policy.DelaySeconds, resource.Kind == ResourceKind.Sitemap, response =>
+        {
+            PublisherHeaders.CheckRestrictions(response);
+            if (policy.Key.StartsWith("auto-header-", StringComparison.Ordinal) && PublisherHeaders.OpenFormat(response) != policy.Format)
+                throw new IngestionException("The publisher's processing or reuse grant changed.") { RequiresSourceReview = true };
+        }), ct);
     }
+
+    internal Task<DocumentFormat?> InspectAsync(Uri uri, CancellationToken ct) =>
+        collector.InspectHeadersAsync(uri, PublisherHeaders.OpenFormat, ct);
 
     public static SourceDefinition Source(DiscoveredResource resource, SourcePolicy policy)
     {

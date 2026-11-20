@@ -58,11 +58,19 @@ public sealed record ResearchTarget(string Make, string Model, string Chassis, s
     }
 }
 
-public sealed record SearchHit(string Url, string Title, string Snippet);
+public sealed record SearchHit(string Url, string Title, string Snippet, string? Publisher = null,
+    string? Language = null, string? Category = null, string? Reason = null, string? Reference = null, string? Observation = null);
+
+public sealed record ProposedSearch(string Text, string Language, string Category, string Reason);
+public sealed record SearchOutcome(IReadOnlyList<SearchHit> Hits, IReadOnlyList<ProposedSearch> Proposals,
+    int InputTokens = 0, int OutputTokens = 0, IngestionException? Error = null);
 
 public interface ISearchProvider
 {
     Task<IReadOnlyList<SearchHit>> SearchAsync(SearchQuery query, CancellationToken ct);
+
+    async Task<SearchOutcome> DiscoverAsync(SearchQuery query, ResearchBrief brief, CancellationToken ct) =>
+        new(await SearchAsync(query, ct), []);
 }
 
 public sealed class BraveSearchProvider(HttpClient client, string key) : ISearchProvider

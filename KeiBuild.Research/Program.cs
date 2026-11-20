@@ -26,12 +26,18 @@ if (args.Length == 0 || args is ["--help"] or ["-h"])
 
 try
 {
+    if (args is ["codex-check"])
+    {
+        await new CodexKnowledgeExtractor().CheckAsync(CancellationToken.None);
+        Console.WriteLine("ChatGPT login and extraction sandbox verified.");
+        return 0;
+    }
     var command = CommandLine.Parse(args);
     if (command.Command == "plan" || command.Has("--dry-run"))
     {
         var target = await ResearchTarget.ReadAsync(command.Get("--target-file"), CancellationToken.None);
-        Print(new { command.Campaign, target.Chassis, command.Provider, command.MaxMinutes, command.Limits,
-            Queries = target.Queries().ToArray() });
+        Print(new { command.Campaign, target.Chassis, command.SearchProvider, command.Provider, command.MaxMinutes, command.Limits,
+            Categories = ResearchTarget.Topics.Select(t => t.Key).Concat(VehicleSystem.All.Select(s => s.Key)), Queries = target.Queries().ToArray() });
         return 0;
     }
 
@@ -99,7 +105,7 @@ static async Task ExecuteAsync(IServiceProvider services, CommandLine command, C
         Console.WriteLine("Stop requested. The worker finishes its active batch and releases the database lease.");
         return;
     }
-    if (command.Command is "status" or "sources" or "claims" or "jobs" or "coverage" or "summary")
+    if (command.Command is "status" or "sources" or "claims" or "jobs" or "coverage" or "summary" or "source-review")
     {
         var readCampaign = await store.FindAsync(command.Campaign, ct);
         if (command.Command == "summary")
@@ -112,6 +118,7 @@ static async Task ExecuteAsync(IServiceProvider services, CommandLine command, C
         {
             "jobs" => await report.JobsAsync(readCampaign.Id, command.Offset, ct),
             "coverage" => await report.CoverageAsync(readCampaign.Id, ct),
+            "source-review" => await report.SourcesAsync(readCampaign.Id, command.Offset, ct, reviewOnly: true),
             "sources" => await report.SourcesAsync(readCampaign.Id, command.Offset, ct),
             "claims" => await report.ClaimsAsync(readCampaign.Id, command.Offset, ct),
             _ => await report.StatusAsync(readCampaign, ct)
@@ -133,6 +140,21 @@ static async Task ExecuteAsync(IServiceProvider services, CommandLine command, C
                 Print(await report.StatusAsync(campaign, ct));
             else
                 await RunAsync(db, store, report, campaign, command, ct);
+            break;
+        case "approve-source":
+            if (campaign.Mode != CampaignMode.Live) throw new IngestionException("Choose a live campaign.");
+            var origin = UrlRules.Normalize(command.Need("--scope")) ?? throw new IngestionException("Specify a public HTTPS scope.");
+            var format = (command.Get("--format") ?? "html") switch
+            {
+                "html" => KeiBuild.Ingestion.Sources.DocumentFormat.Html,
+                "text" => KeiBuild.Ingestion.Sources.DocumentFormat.Text,
+                "markdown" => KeiBuild.Ingestion.Sources.DocumentFormat.Markdown,
+                _ => throw new IngestionException("Choose html, text or markdown.")
+            };
+            await store.ApplyPoliciesAsync(campaign, [new("publisher-" + SourceEligibility.Key(origin.AbsoluteUri),
+                origin.AbsoluteUri, true, command.Need("--publisher"), SourceKind.Community, format, command.Need("--basis"),
+                true, true, true, false, false)], ct);
+            Console.WriteLine($"Saved publisher approval for {origin.AbsoluteUri}.");
             break;
         case "policies":
             if (campaign.Mode != CampaignMode.Live)
@@ -184,7 +206,18 @@ static async Task RunAsync(ResearchDb db, CampaignStore store, CampaignReport re
         using var searchHttp = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
         using var crawlHttp = HttpDocumentCollector.CreateClient();
         Func<string, string?> keys = Environment.GetEnvironmentVariable;
-        var search = discover ? new BraveSearchProvider(searchHttp, ProviderKeys.Require(keys, "BRAVE_SEARCH_API_KEY")) : null;
+        var state = keys("KEIBUILD_RESEARCH_STATE_DIR") ?? Path.Combine(".local", "research", "http");
+        var guardedHttp = new HttpDocumentCollector(crawlHttp, state);
+        var variantModel = await (from variant in db.VehicleVariants join vehicle in db.VehicleModels on variant.VehicleModelId equals vehicle.Id
+                                  where variant.Id == campaign.VehicleVariantId select new { Name = vehicle.Make + " " + vehicle.Model, variant.Engine }).SingleAsync(ct);
+        ISearchProvider? search = !discover ? null : command.SearchProvider switch
+        {
+            "codex" => new CodexDiscoveryProvider(),
+            "brave" => new BraveSearchProvider(searchHttp, ProviderKeys.Require(keys, "BRAVE_SEARCH_API_KEY")),
+            "crossref" => new CrossrefSearch(guardedHttp, variantModel.Name, variantModel.Engine),
+            _ => throw new IngestionException("Unsupported search provider.")
+        };
+        if (discover) Console.Error.WriteLine($"Discovery provider: {search!.GetType().Name}.");
         var model = keys("KEIBUILD_OPENAI_MODEL")?.Trim();
         IKnowledgeExtractor? ai = null;
         if (work && command.Limits.AiCalls > 0)
@@ -194,8 +227,7 @@ static async Task RunAsync(ResearchDb db, CampaignStore store, CampaignReport re
                 ai = new OpenAiKnowledgeExtractor(string.IsNullOrWhiteSpace(model) ? "gpt-4o-mini" : model,
                     ProviderKeys.Require(keys, "OPENAI_API_KEY"));
         }
-        var state = keys("KEIBUILD_RESEARCH_STATE_DIR") ?? Path.Combine(".local", "research", "http");
-        var collector = new ResearchHttpCollector(new HttpDocumentCollector(crawlHttp, state));
+        var collector = new ResearchHttpCollector(guardedHttp);
         pause = await new CampaignSession(db, new CampaignRunner(db, store, search, collector, ai), ai)
             .RunAsync(campaign, command, discover, work, ct);
     }

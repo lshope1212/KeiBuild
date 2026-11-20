@@ -11,7 +11,7 @@ public sealed class CampaignReport(ResearchDb db)
         var policy = await db.Policies.AsNoTracking().Where(row => row.CampaignId == campaign.Id).ToListAsync(ct);
         var resources = db.Resources.AsNoTracking().Where(row => row.CampaignId == campaign.Id);
         var ready = 0;
-        await foreach (var item in resources.Select(r => new DiscoveredResource { Url = r.Url, Kind = r.Kind })
+        await foreach (var item in resources.Select(r => new DiscoveredResource { Url = r.Url, Kind = r.Kind, AccessHold = r.AccessHold })
                            .AsAsyncEnumerable().WithCancellation(ct))
             if (PolicyRules.Permitted(policy, item) != null) ready++;
         var search = db.Queries.Where(row => row.CampaignId == campaign.Id);
@@ -37,12 +37,18 @@ public sealed class CampaignReport(ResearchDb db)
                            where run.CampaignId == campaign.Id && attempt.Error != null
                            select new { Stage = "Search", attempt.StartedAt, attempt.Error, HttpStatus = (int?)null };
 
+        var latest = await runs.OrderByDescending(r => r.StartedAt).Select(r => new { r.Id, r.Command, r.DiscoveryProvider,
+            ExtractionProvider = r.Provider, r.Provider, r.StartedAt, r.EndedAt, r.StopReason }).FirstOrDefaultAsync(ct);
+        var control = await db.Campaigns.Where(c => c.Id == campaign.Id).Select(c => new { c.StopRequested, c.SearchAfter, c.ExtractionAfter }).SingleAsync(ct);
         return new
         {
             campaign.Name, campaign.Mode,
             Chassis = await db.VehicleVariants.Where(v => v.Id == campaign.VehicleVariantId).Select(v => v.Chassis).SingleAsync(ct),
-            Control = await db.Campaigns.Where(c => c.Id == campaign.Id).Select(c => new { c.StopRequested, c.SearchAfter, c.ExtractionAfter }).SingleAsync(ct),
-            LatestRun = await runs.OrderByDescending(r => r.StartedAt).Select(r => new { r.Id, r.Command, r.Provider, r.StartedAt, r.EndedAt, r.StopReason }).FirstOrDefaultAsync(ct),
+            Control = control,
+            LatestRun = latest,
+            CampaignState = latest?.EndedAt == null && latest != null ? (control.StopRequested ? "stopping" : "running or interrupted") :
+                latest?.StopReason != null ? "paused" : control.StopRequested ? "stopped" : latest == null ? "ready" : "idle",
+            DiscoveryUsage = await runs.Where(r => r.Searches > 0).GroupBy(r => r.DiscoveryProvider ?? "unrecorded").Select(g => new { Provider = g.Key, Searches = g.Sum(r => (long)r.Searches), InputTokens = g.Sum(r => r.DiscoveryInputTokens), OutputTokens = g.Sum(r => r.DiscoveryOutputTokens) }).ToListAsync(ct),
             ProviderUsage = byProvider.Select(r => new { r.Provider, r.Calls, r.InputTokens, r.OutputTokens }),
             TopicsCovered = await search.Where(row => row.State == WorkState.Done).Select(row => row.TopicId).Distinct().CountAsync(ct),
             SearchStates = await search.GroupBy(row => row.State).Select(group => new { State = group.Key, Count = group.Count() }).ToListAsync(ct),
@@ -51,6 +57,8 @@ public sealed class CampaignReport(ResearchDb db)
             UrlsDiscovered = await resources.CountAsync(ct), RelevantResources = await resources.CountAsync(item => item.Relevance > 0, ct),
             ApprovedSources = policy.Count(item => item.AllowFetch && item.AllowAi && item.AllowEvidence),
             ReadyResources = ready,
+            BlockedSources = await jobs.CountAsync(j => j.State == WorkState.Blocked, ct),
+            EvidenceBackedClaims = await claims.CountAsync(c => db.Evidence.Any(e => e.ClaimId == c.Id), ct),
             DocumentsFetched = await versions.CountAsync(ct),
             DocumentsProcessed = await versions.CountAsync(row => row.ProcessedAt != null, ct),
             Claims = await claims.CountAsync(ct),
@@ -101,21 +109,29 @@ public sealed class CampaignReport(ResearchDb db)
                                   q.GapReason == GapDiscovery.ConflictReason ? !claims.Any(other => other.GroupKey == c.GroupKey && other.State == Decision.Pending) :
                                   db.Evidence.Where(e => e.ClaimId == c.Id).Select(e => e.Version.ContentId).Distinct().Count() >= 2
                           }).ToListAsync(ct);
+        var systems = VehicleSystem.All.ToDictionary(s => s.Key, _ => 0);
+        await foreach (var fact in claims.Where(c => db.Evidence.Any(e => e.ClaimId == c.Id))
+            .Select(c => new { c.Subject, c.Attribute }).AsAsyncEnumerable().WithCancellation(ct))
+            foreach (var system in VehicleSystem.All.Where(s => s.Covers(fact.Subject, fact.Attribute)))
+                systems[system.Key]++;
         return new { Topics = topics.Select(t => new { t.Key, t.Title, t.SearchesCompleted,
-            CandidateOrApprovedClaims = t.Key == "japanese" ? japaneseClaims : counts.Where(c => GapDiscovery.Topic(c.Kind) == t.Key).Sum(c => c.Count) }),
+            CandidateOrApprovedClaims = t.Key == "japanese" ? japaneseClaims : systems.TryGetValue(t.Key, out var count) ? count : counts.Where(c => GapDiscovery.Topic(c.Kind) == t.Key).Sum(c => c.Count) }),
+            PlannedFollowups = await db.Queries.Where(q => q.CampaignId == campaign && q.DiscoveryProvider == "codex" && q.GapReason != null)
+                .OrderBy(q => q.Priority).ThenBy(q => q.Text).Select(q => new { q.Text, q.Language, q.GapReason, q.State }).ToListAsync(ct),
             UnresolvedGaps = gaps.Where(g => !g.Resolved), ResolvedGaps = gaps.Count(g => g.Resolved) };
     }
 
-    public async Task<object> SourcesAsync(Guid campaign, int offset, CancellationToken ct)
+    public async Task<object> SourcesAsync(Guid campaign, int offset, CancellationToken ct, bool reviewOnly = false)
     {
         var policies = await db.Policies.AsNoTracking().Where(row => row.CampaignId == campaign).ToListAsync(ct);
-        var items = await db.Resources.AsNoTracking().Where(row => row.CampaignId == campaign)
+        var items = await db.Resources.AsNoTracking().Where(row => row.CampaignId == campaign &&
+            (!reviewOnly || row.Relevance > 0 && db.Jobs.Any(j => j.ResourceId == row.Id && j.State == WorkState.Blocked)))
             .OrderByDescending(row => row.Relevance).ThenBy(row => row.Url).Skip(offset).Take(100).ToListAsync(ct);
         var ids = items.Select(row => row.Id).ToArray();
         var jobs = await db.Jobs.AsNoTracking().Where(row => ids.Contains(row.ResourceId)).ToDictionaryAsync(row => row.ResourceId, ct);
         return items.Select(row => new
         {
-            row.Id, row.Url, row.Title, row.Kind, row.Relevance, row.LastRetrievedAt,
+            row.Id, row.Url, row.Title, row.Snippet, row.Language, row.DiscoveryCategory, row.DiscoveryReason, row.DiscoveryObservation, Publisher = PolicyRules.Match(policies, row.Url)?.Publisher ?? row.Publisher ?? row.Host, row.Assessment, row.Kind, row.Relevance, row.LastRetrievedAt,
             Approval = PolicyRules.Permitted(policies, row)?.Key, Queue = jobs.GetValueOrDefault(row.Id)?.State
         }).ToArray();
     }
@@ -133,7 +149,7 @@ public sealed class CampaignReport(ResearchDb db)
                               select new
                               {
                                   excerpt.ClaimId, DocumentId = resource.Id, VersionId = version.Id, resource.Url,
-                                  version.Publisher, version.SourceKind, version.Language, version.RetrievedAt,
+                                  version.Publisher, Terms = db.Policies.Where(p => p.Id == version.PolicyId).Select(p => p.PermissionNotes).First(), version.SourceKind, version.Language, version.RetrievedAt,
                                   content.Sha256, excerpt.Locator, excerpt.Passage, excerpt.EnglishTranslation
                               }).ToListAsync(ct);
         var byClaim = evidence.ToLookup(row => row.ClaimId);

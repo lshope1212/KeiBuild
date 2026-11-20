@@ -68,12 +68,13 @@ public static class PolicyRules
 
     public static SourcePolicy? Match(IReadOnlyList<SourcePolicy> policies, string url) => policies
         .Where(policy => policy.Prefix ? url.StartsWith(policy.Scope, StringComparison.Ordinal) : url == policy.Scope)
-        .OrderByDescending(policy => !policy.Prefix).ThenByDescending(policy => policy.Scope.Length)
+        .OrderBy(policy => policy.Key.StartsWith("auto-", StringComparison.Ordinal)).ThenByDescending(policy => !policy.Prefix).ThenByDescending(policy => policy.Scope.Length)
         .ThenBy(policy => policy.AllowFetch && policy.AllowAi && policy.AllowEvidence)
         .FirstOrDefault();
 
     public static SourcePolicy? Permitted(IReadOnlyList<SourcePolicy> policies, DiscoveredResource resource)
     {
+        if (resource.AccessHold != null || resource.Kind != ResourceKind.Sitemap && SourceEligibility.Unsupported(resource.Url)) return null;
         if (resource.Kind == ResourceKind.Sitemap)
         {
             var sitemap = policies.Where(policy => policy.SitemapUrl == resource.Url)

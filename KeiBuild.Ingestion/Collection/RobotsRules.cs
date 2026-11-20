@@ -25,7 +25,7 @@ public static class RobotsRules
                 bestMatch = rule;
         }
         if (bestMatch is { Allow: false })
-            throw new IngestionException("robots.txt disallows this URL for KeiBuildIngestion.");
+            throw new IngestionException("robots.txt disallows this URL for KeiBuildIngestion.") { RequiresSourceReview = true };
 
         var delay = TimeSpan.FromSeconds(1);
         foreach (var value in applicable.SelectMany(group => group.Delays))

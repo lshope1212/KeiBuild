@@ -15,6 +15,19 @@ namespace KeiBuild.Research.Execution;
 public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchProvider? search,
     IResearchCollector? collector, IKnowledgeExtractor? extractor)
 {
+    internal string? SearchProvider => search switch
+    {
+        CodexDiscoveryProvider => "codex", CrossrefSearch => CrossrefSearch.Provider, BraveSearchProvider => "brave",
+        null => null, _ => "fixture"
+    };
+    internal bool NoSearchCharge => search is CodexDiscoveryProvider or CrossrefSearch;
+    internal IQueryable<SearchQuery> Queue(Guid campaign)
+    {
+        var general = search is not CrossrefSearch;
+        var provider = SearchProvider;
+        return db.Queries.Where(q => q.CampaignId == campaign && (q.DiscoveryProvider == provider ||
+            general && q.DiscoveryProvider == null || q.OriginClaimId != null));
+    }
     private VehicleVariant variant = null!;
     public async Task<ResearchRun> RunAsync(ResearchCampaign campaign, string command, RunLimits limits,
         bool discover, bool work, CancellationToken ct)
@@ -22,29 +35,88 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
         limits.Validate();
         variant = await db.VehicleVariants.SingleAsync(v => v.Id == campaign.VehicleVariantId, ct);
         await store.RecoverAsync(campaign.Id, limits.Retries, ct);
-        var run = new ResearchRun { CampaignId = campaign.Id, Command = command, Provider = extractor?.Name };
+        var run = new ResearchRun { CampaignId = campaign.Id, Command = command, Provider = extractor?.Name, DiscoveryProvider = SearchProvider };
         db.Runs.Add(run);
         await db.SaveChangesAsync(ct);
-        var budget = new RunBudget(limits, run, campaign.Mode == CampaignMode.Offline, extractor is CodexKnowledgeExtractor);
+        var budget = new RunBudget(limits, run, campaign.Mode == CampaignMode.Offline, extractor is CodexKnowledgeExtractor, NoSearchCharge);
         var policies = await db.Policies.Where(item => item.CampaignId == campaign.Id).ToListAsync(ct);
         if (discover && search is not null && !(campaign.SearchAfter > DateTimeOffset.UtcNow))
             await DiscoverAsync(campaign, limits, run, budget, policies, ct);
         if (work && collector is not null && run.StopReason is null && !(campaign.ExtractionAfter > DateTimeOffset.UtcNow))
             await WorkAsync(campaign, limits, run, budget, policies, ct);
+        if (work && campaign.Mode == CampaignMode.Live && run.StopReason == null && collector is ResearchHttpCollector http)
+            await AssessCandidatesAsync(campaign.Id, http, budget, limits, policies, run, ct);
         run.EndedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return run;
     }
 
+    private async Task AssessCandidatesAsync(Guid campaign, ResearchHttpCollector http, RunBudget budget, RunLimits limits,
+        List<SourcePolicy> policies, ResearchRun run, CancellationToken ct)
+    {
+        while (budget.CanFetch && !await StoppingAsync(campaign, ct))
+        {
+            var now = DateTimeOffset.UtcNow;
+            var job = await db.Jobs.Include(j => j.Resource).Where(j => j.Resource.CampaignId == campaign &&
+                j.State == WorkState.Blocked && j.Resource.Assessment == PublisherHeaders.Missing && j.DueAt <= now &&
+                j.Attempts < limits.Retries).OrderByDescending(j => j.Resource.Relevance).ThenBy(j => j.Id).FirstOrDefaultAsync(ct);
+            if (job == null) break;
+            budget.ReservePage();
+            job.Attempts++;
+            job.State = WorkState.Running;
+            var attempt = new CrawlAttempt { RunId = run.Id, JobId = job.Id };
+            db.CrawlAttempts.Add(attempt);
+            await db.SaveChangesAsync(ct);
+            job.State = WorkState.Blocked;
+            try
+            {
+                var format = await http.InspectAsync(new Uri(job.Resource.Url), ct);
+                attempt.HttpStatus = 200;
+                if (format is {} supported)
+                {
+                    var policy = new SourcePolicy { CampaignId = campaign };
+                    PolicyRules.Apply(new("auto-header-" + SourceEligibility.Key(job.Resource.Url),
+                        job.Resource.Url, false, job.Resource.Publisher ?? job.Resource.Host, SourceKind.Community, supported,
+                        PublisherHeaders.Basis, true, true, true, false, false), policy);
+                    policies.Add(policy);
+                    db.Policies.Add(policy);
+                    attempt.PolicyId = policy.Id;
+                    SourceEligibility.Assess(job.Resource, policies, db);
+                    job.State = WorkState.Pending;
+                    job.Attempts = 0;
+                    job.DueAt = DateTimeOffset.UtcNow.AddSeconds(policy.DelaySeconds);
+                }
+                else job.Resource.Assessment = "Metadata review: no unambiguous supported format, CC0 license and affirmative mining declaration.";
+            }
+            catch (IngestionException error)
+            {
+                attempt.Error = error.Message;
+                attempt.HttpStatus = error.HttpStatus;
+                if (error.RequiresSourceReview)
+                    job.Resource.Assessment = job.Resource.AccessHold = "Review: " + error.Message;
+                else if (error is { RetryAt: not null, HttpStatus: null })
+                {
+                    job.Attempts--;
+                    job.DueAt = RetryPolicy.Due(job.Attempts, error.RetryAt);
+                }
+                else if (!error.IsTransient || job.Attempts >= limits.Retries)
+                    job.Resource.Assessment = "Metadata review: " + error.Message;
+                else job.DueAt = RetryPolicy.Due(job.Attempts, error.RetryAt);
+            }
+            attempt.EndedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
     private async Task DiscoverAsync(ResearchCampaign campaign, RunLimits limits, ResearchRun run,
-        RunBudget budget, IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
+        RunBudget budget, List<SourcePolicy> policies, CancellationToken ct)
     {
         while (budget.CanSearch && !await StoppingAsync(campaign.Id, ct))
         {
             var now = DateTimeOffset.UtcNow;
-            var query = await db.Queries.Where(item => item.CampaignId == campaign.Id &&
+            var query = await Queue(campaign.Id).Where(item =>
                     item.State == WorkState.Pending && item.DueAt <= now && item.Attempts < limits.Retries)
-                .OrderBy(item => item.Priority).FirstOrDefaultAsync(ct);
+                .OrderBy(item => item.Priority).ThenBy(item => item.DueAt).ThenBy(item => item.Id).FirstOrDefaultAsync(ct);
             if (query is null)
                 break;
             if (campaign.Mode == CampaignMode.Live && campaign.SearchAfter is { } after && after > now)
@@ -57,12 +129,23 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             await db.SaveChangesAsync(ct);
             try
             {
-                var hits = await search!.SearchAsync(query, ct);
+                var brief = search is CodexDiscoveryProvider
+                    ? await ResearchBrief.LoadAsync(db, campaign.Id, limits.ExpansionLimit, ct) : ResearchBrief.Empty;
+                var outcome = await search!.DiscoverAsync(query, brief, ct);
+                run.DiscoveryInputTokens += outcome.InputTokens;
+                run.DiscoveryOutputTokens += outcome.OutputTokens;
+                if (outcome.Error != null) throw outcome.Error;
+                var hits = outcome.Hits;
+                if (search is CodexDiscoveryProvider)
+                {
+                    attempt.CitationsJson = JsonSerializer.Serialize(hits, JsonSerializerOptions.Web);
+                    await brief.QueueAsync(db, campaign.Id, variant, outcome.Proposals, ct);
+                }
                 foreach (var hit in hits.Take(20))
                     await AddHitAsync(campaign.Id, hit, query, null, policies, linksOnly: false, run, ct);
                 query.State = WorkState.Done;
                 attempt.Returned = hits.Count;
-                if (campaign.Mode == CampaignMode.Live) campaign.SearchAfter = DateTimeOffset.UtcNow.AddSeconds(1);
+                if (campaign.Mode == CampaignMode.Live) campaign.SearchAfter = DateTimeOffset.UtcNow.AddSeconds(SearchProvider == CrossrefSearch.Provider ? 11 : 1);
             }
             catch (IngestionException error)
             {
@@ -88,17 +171,21 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     }
 
     private async Task AddHitAsync(Guid campaign, SearchHit hit, SearchQuery? query, DiscoveredResource? parent,
-        IReadOnlyList<SourcePolicy> policies, bool linksOnly, ResearchRun run, CancellationToken ct)
+        List<SourcePolicy> policies, bool linksOnly, ResearchRun run, CancellationToken ct)
     {
         var uri = UrlRules.Normalize(hit.Url);
         if (uri is null)
             return;
         var url = uri.AbsoluteUri;
-        if (linksOnly && PolicyRules.Match(policies, url) is not { AllowFetch: true, AllowAi: true, AllowEvidence: true })
+        if (linksOnly && !SourceEligibility.IsArticle(uri) && PolicyRules.Match(policies, url) is not { AllowFetch: true, AllowAi: true, AllowEvidence: true })
             return;
         var title = BraveSearchProvider.Clean(hit.Title, 200);
         var snippet = BraveSearchProvider.Clean(hit.Snippet, 500);
         var (kind, relevance) = Relevance.Classify(uri, title, snippet, variant.Chassis, variant.Engine);
+        if (kind == ResourceKind.Irrelevant && (Relevance.Mentions(title + " " + snippet, variant.Engine) ||
+            variant.Chassis == "HA4" && SourceEligibility.IsArticle(uri) &&
+            (title.Contains("Honda Acty", StringComparison.OrdinalIgnoreCase) || title.Contains("ホンダ・アクティ", StringComparison.Ordinal))))
+            (kind, relevance) = (ResourceKind.Community, 45);
         var existing = db.Resources.Local.FirstOrDefault(item => item.CampaignId == campaign && item.Url == url) ??
             await db.Resources.SingleOrDefaultAsync(item => item.CampaignId == campaign && item.Url == url, ct);
         if (existing is not null)
@@ -107,31 +194,35 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             // Discovery from a better query may surface application details the first hit lacked.
             if (existing.Kind != ResourceKind.Sitemap && relevance > existing.Relevance)
             {
-                if (existing.Relevance == 0)
-                    db.Jobs.Add(new CrawlJob { Resource = existing,
-                        State = PolicyRules.Permitted(policies, existing) is null ? WorkState.Blocked : WorkState.Pending });
+                var needsJob = existing.Relevance == 0;
                 existing.Kind = kind;
                 existing.Relevance = relevance;
                 existing.Title = title;
                 existing.Snippet = snippet;
-                existing.Language = query?.Language ?? parent?.Language;
+                if (hit.Publisher != null) existing.Publisher = BraveSearchProvider.Clean(hit.Publisher, 150);
+                existing.Language = hit.Language ?? query?.Language ?? parent?.Language;
+                var allowed = SourceEligibility.Assess(existing, policies, db);
+                if (needsJob && existing.Kind != ResourceKind.Irrelevant && !db.Jobs.Local.Any(j => j.ResourceId == existing.Id) &&
+                    !await db.Jobs.AnyAsync(j => j.ResourceId == existing.Id, ct))
+                    db.Jobs.Add(new CrawlJob { Resource = existing, State = allowed == null ? WorkState.Blocked : WorkState.Pending });
             }
             return;
         }
         var resource = new DiscoveredResource
         {
             CampaignId = campaign, SearchQueryId = query?.Id, ParentId = parent?.Id, Url = url,
-            Host = uri.IdnHost, Title = title, Snippet = snippet, Language = query?.Language ?? parent?.Language,
-            Kind = kind, Relevance = relevance
+            Host = uri.IdnHost, Publisher = hit.Publisher == null ? null : BraveSearchProvider.Clean(hit.Publisher, 150), Title = title, Snippet = snippet, Language = hit.Language ?? query?.Language ?? parent?.Language,
+            Kind = kind, Relevance = relevance, DiscoveryReason = hit.Reason, DiscoveryCategory = hit.Category, DiscoveryObservation = hit.Observation
         };
         db.Resources.Add(resource);
-        if (kind != ResourceKind.Irrelevant)
+        var approved = SourceEligibility.Assess(resource, policies, db);
+        if (resource.Kind != ResourceKind.Irrelevant)
             db.Jobs.Add(new CrawlJob { Resource = resource,
-                State = PolicyRules.Permitted(policies, resource) is null ? WorkState.Blocked : WorkState.Pending });
+                State = approved is null ? WorkState.Blocked : WorkState.Pending });
     }
 
     private async Task WorkAsync(ResearchCampaign campaign, RunLimits limits, ResearchRun run, RunBudget budget,
-        IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
+        List<SourcePolicy> policies, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
         if (limits.RefreshHours is { } hours)
@@ -211,7 +302,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             {
                 var saved = snapshots.FirstOrDefault(v => v.ResourceId == item.Job.ResourceId && v.PolicyId == item.Policy.Id);
                 return saved == null ? FetchAsync(item, limits.MaximumBytes, ct) :
-                    Task.FromResult(new FetchResult(new CollectedDocument(saved.Snapshot!, saved.RetrievedAt, saved.EncodingKey), null, true));
+                    Task.FromResult(new FetchResult(new CollectedDocument(saved.Snapshot!, saved.RetrievedAt, saved.EncodingKey, RetrievedFromUrl: !isOffline), null, true));
             }));
             for (var i = 0; i < batch.Count; i++)
             {
@@ -266,7 +357,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
     }
 
     private async Task ProcessAsync(Guid campaign, FetchWork work, CollectedDocument document, RunLimits limits,
-        ResearchRun run, RunBudget budget, IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
+        ResearchRun run, RunBudget budget, List<SourcePolicy> policies, CancellationToken ct)
     {
         var job = work.Job;
         var resource = job.Resource;
@@ -275,6 +366,9 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
         var sitemap = resource.Kind == ResourceKind.Sitemap;
         var hash = Convert.ToHexStringLower(SHA256.HashData(document.Bytes));
         var encoding = (sitemap ? "sitemap:" : "") + (document.Charset?.Trim('"').ToLowerInvariant() ?? "");
+        var original = document;
+        if (!sitemap && document.RetrievedFromUrl)
+            document = SourceEligibility.CheckDocument(document, policy, new Uri(resource.Url));
         var content = await db.Contents.SingleOrDefaultAsync(item => item.CampaignId == campaign &&
             item.Sha256 == hash && item.Format == policy.Format && item.EncodingKey == encoding, ct);
         if (content is null)
@@ -292,7 +386,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             {
                 ResourceId = resource.Id, ContentId = content.Id, PolicyId = policy.Id, Publisher = policy.Publisher,
                 SourceKind = policy.Kind, Language = source.Language, RetrievedAt = document.CollectedAtUtc,
-                SizeBytes = document.Bytes.Length, Snapshot = policy.AllowSnapshot ? document.Bytes : null
+                SizeBytes = original.Bytes.Length, Snapshot = policy.AllowSnapshot ? original.Bytes : null
             };
             db.Versions.Add(version);
         }
@@ -301,7 +395,9 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
         work.Attempt.VersionId = version.Id;
         await db.SaveChangesAsync(ct);
 
-        if (version.ProcessedAt is not null)
+        var cached = content.AnalysisJson == null ? null : JsonSerializer.Deserialize<AnalysisResult>(content.AnalysisJson, CatalogImport.JsonOptions);
+        var reassess = cached is { ProofRevision: 0, Facts.Count: 0 } && version.Language == "ja";
+        if (version.ProcessedAt is not null && !reassess)
         {
             job.State = WorkState.Done;
             return;
@@ -317,8 +413,8 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             source = source with { Language = source.Language ?? normalized.Language };
             version.Language = source.Language;
             AnalysisResult result;
-            if (content.AnalysisJson is { } json)
-                result = JsonSerializer.Deserialize<AnalysisResult>(json, CatalogImport.JsonOptions)!;
+            if (cached != null && !reassess)
+                result = cached;
             else
             {
                 if (!budget.ReserveAnalysis())
@@ -335,6 +431,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                 run.InputTokens += reply.InputTokens;
                 run.OutputTokens += reply.OutputTokens;
                 result = await KnowledgeAnalysis.ValidateAsync(reply, source, document, normalized, ct, variant.Chassis);
+                result = result with { ProofRevision = 1 };
                 content.AnalysisJson = JsonSerializer.Serialize(result, CatalogImport.JsonOptions);
                 content.AnalyzedAt = DateTimeOffset.UtcNow;
                 run.WithheldClaims += result.Withheld;
@@ -345,7 +442,7 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
                 await SaveClaimAsync(campaign, fact, version, source, run, ct);
             if (policy.ExploreLinks && policy.Format == KeiBuild.Ingestion.Sources.DocumentFormat.Html)
             {
-                foreach (var link in LinkDiscovery.FromHtml(document, new Uri(resource.Url)))
+                foreach (var link in LinkDiscovery.FromHtml(original, new Uri(resource.Url)))
                     await AddHitAsync(campaign, link, null, resource, policies, linksOnly: true, run, ct);
             }
         }
@@ -412,6 +509,11 @@ public sealed class CampaignRunner(ResearchDb db, CampaignStore store, ISearchPr
             job.Attempts--;
         job.State = auth || deferred || error.IsTransient && job.Attempts < limits.Retries
             ? WorkState.Pending : WorkState.Failed;
+        if (error.RequiresSourceReview)
+        {
+            job.Resource.Assessment = job.Resource.AccessHold = "Review: " + error.Message;
+            job.State = WorkState.Blocked;
+        }
         job.DueAt = RetryPolicy.Due(job.Attempts, error.RetryAt);
         if (!fetched)
             work.Attempt.HttpStatus = error.HttpStatus;

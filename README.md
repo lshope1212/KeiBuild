@@ -47,7 +47,7 @@ The console prints the path to a review-ready `candidates.json`. Use the [data p
 
 The app uses .NET 10 and static server rendering. Search is an ordinary GET request with a shareable URL, and the review page submits standard POST forms. Blazor’s per-page Interactive Server mode can be added when a feature needs live state, such as comparing options in a build planner. [Microsoft’s Blazor render modes](https://learn.microsoft.com/en-us/aspnet/core/blazor/components/render-modes?view=aspnetcore-10.0)
 
-The [research guide](docs/research.md) covers PostgreSQL setup, the offline HA4 demo, bounded continuous campaigns using a local Codex login, evidence review, and campaign exports.
+From PowerShell, run `.\scripts\research.ps1 pilot HA4` to discover sources and extract evidence using your local Codex ChatGPT login. No Brave key or manual URL list is required. Inspect `.\scripts\research.ps1 status HA4` for provider usage, `coverage HA4` for open questions, and `review HA4` for sources awaiting permission. Use `stop HA4` and `resume HA4` to control the worker. The [research guide](docs/research.md) covers Windows setup, optional Brave discovery, publisher approval, campaign limits and exports.
 
 <details>
 <summary>Hero image provenance</summary>

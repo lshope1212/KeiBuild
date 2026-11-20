@@ -56,6 +56,7 @@ public sealed class SearchQuery
     public Guid CampaignId { get; set; }
     public Guid TopicId { get; set; }
     public string Language { get; set; } = "";
+    public string? DiscoveryProvider { get; set; }
     public string Text { get; set; } = "";
     public Guid? OriginClaimId { get; set; }
     public string? GapPartNumber { get; set; }
@@ -71,6 +72,9 @@ public sealed class ResearchRun
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid CampaignId { get; set; }
     public string? Provider { get; set; }
+    public string? DiscoveryProvider { get; set; }
+    public long DiscoveryInputTokens { get; set; }
+    public long DiscoveryOutputTokens { get; set; }
     public string? StopReason { get; set; }
     public string Command { get; set; } = "";
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -94,6 +98,7 @@ public sealed class SearchAttempt
     public Guid QueryId { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? EndedAt { get; set; }
+    public string? CitationsJson { get; set; }
     public int? Returned { get; set; }
     public string? Error { get; set; }
 }
@@ -105,6 +110,12 @@ public sealed class DiscoveredResource
     public Guid? SearchQueryId { get; set; }
     public Guid? ParentId { get; set; }
     public string Url { get; set; } = "";
+    public string? Publisher { get; set; }
+    public string? DiscoveryReason { get; set; }
+    public string? DiscoveryCategory { get; set; }
+    public string? DiscoveryObservation { get; set; }
+    public string? Assessment { get; set; }
+    public string? AccessHold { get; set; }
     public string Host { get; set; } = "";
     public string Title { get; set; } = "";
     public string Snippet { get; set; } = "";

@@ -49,6 +49,7 @@ public sealed class ResearchDb(DbContextOptions<ResearchDb> options) : DbContext
         Link<SearchQuery, ResearchTopic>(model, nameof(SearchQuery.TopicId));
         Link<ResearchRun, ResearchCampaign>(model, nameof(ResearchRun.CampaignId));
         model.Entity<ResearchRun>().Property(item => item.EstimatedUsd).HasPrecision(12, 6);
+        model.Entity<SearchAttempt>().Property(item => item.CitationsJson).HasColumnType("jsonb");
         Link<SearchAttempt, ResearchRun>(model, nameof(SearchAttempt.RunId));
         Link<SearchAttempt, SearchQuery>(model, nameof(SearchAttempt.QueryId));
         model.Entity<DiscoveredResource>().Property(item => item.Url).HasMaxLength(2048);

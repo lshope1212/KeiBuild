@@ -41,6 +41,9 @@ public sealed class CampaignStore(ResearchDb db)
                 v.Chassis == target.Chassis && v.Engine == target.Engine && db.VehicleModels.Any(m =>
                     m.Id == v.VehicleModelId && m.Make == target.Make && m.Model == target.Model), ct))
                 throw new IngestionException("Campaign already exists for another target.");
+            var stored = await db.VehicleVariants.SingleAsync(v => v.Id == existing.VehicleVariantId, ct);
+            if (mode == CampaignMode.Live)
+                await EnsureDiscoveryAsync(existing, stored, ct);
             return existing;
         }
 
@@ -69,7 +72,60 @@ public sealed class CampaignStore(ResearchDb db)
             Text = query.Text, Language = query.Language, Priority = priority
         }));
         await db.SaveChangesAsync(ct);
+        if (mode == CampaignMode.Live)
+            await EnsureDiscoveryAsync(campaign, variant, ct);
         return campaign;
+    }
+
+    internal async Task EnsureDiscoveryAsync(ResearchCampaign campaign, VehicleVariant variant, CancellationToken ct, bool seedSources = false)
+    {
+        // Preserve completed provider history when upgrading the keyless discovery queue.
+        await db.Queries.Where(q => q.CampaignId == campaign.Id && q.DiscoveryProvider == "wikipedia" && q.State == WorkState.Pending)
+            .ExecuteUpdateAsync(u => u.SetProperty(q => q.DiscoveryProvider, CrossrefSearch.Provider), ct);
+        var topics = await db.Topics.Where(t => t.CampaignId == campaign.Id).ToDictionaryAsync(t => t.Key, ct);
+        var known = (await db.Queries.Where(q => q.CampaignId == campaign.Id).Select(q => q.Text).ToListAsync(ct))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        void Add(string key, string lang, string query, int priority, string? provider = null)
+        {
+            if (known.Add(query))
+                db.Queries.Add(new SearchQuery { CampaignId = campaign.Id, TopicId = topics[key].Id,
+                    Text = query, Language = lang, Priority = priority, DiscoveryProvider = provider });
+        }
+        var model = await db.VehicleModels.SingleAsync(m => m.Id == variant.VehicleModelId, ct);
+        var name = model.Make + " " + model.Model;
+        var japanese = name;
+        if (variant.Chassis == "HA4" && model.Make == "Honda" && model.Model == "Acty Truck")
+        {
+            name = "Honda Acty";
+            japanese = "ホンダ アクティ";
+            if (seedSources)
+            {
+                // Two publisher entry points for a fresh campaign. Every page still passes the assessment and robots gates.
+                await EnsureResourceAsync(campaign.Id, "https://en.wikipedia.org/wiki/Honda_Acty", name, ResourceKind.Community, 45, ct);
+                await EnsureResourceAsync(campaign.Id, new Uri("https://ja.wikipedia.org/wiki/ホンダ・アクティ").AbsoluteUri,
+                    "ホンダ・アクティ", ResourceKind.Community, 45, ct);
+            }
+        }
+        Add("identity", "ja", $"{japanese} {variant.Chassis} {variant.Engine} 型式 駆動方式 日本語のオープンライセンス資料 Wikipedia", -1, "codex");
+        Add("identity", "en", $"{name} {variant.Chassis}", 0, CrossrefSearch.Provider);
+        Add("identity", "ja", $"{japanese} {variant.Chassis}", 1, CrossrefSearch.Provider);
+        Add("identity", "en", $"{variant.Engine} {variant.Chassis}", 2, CrossrefSearch.Provider);
+        Add("identity", "ja", $"{japanese} {variant.Engine}", 3, CrossrefSearch.Provider);
+        var priority = 30;
+        foreach (var system in VehicleSystem.All)
+        {
+            if (!topics.ContainsKey(system.Key))
+            {
+                var topic = new ResearchTopic { CampaignId = campaign.Id, Key = system.Key, Title = system.English };
+                topics.Add(system.Key, topic);
+                db.Topics.Add(topic);
+            }
+            Add(system.Key, "en", $"{name} {variant.Chassis} {variant.Engine} {system.English} specifications", priority++);
+            Add(system.Key, "ja", $"{japanese} {variant.Chassis} {variant.Engine} {system.Japanese} 諸元", priority++);
+            Add(system.Key, "en", $"{variant.Chassis} {system.English}", priority++, CrossrefSearch.Provider);
+            Add(system.Key, "ja", $"{variant.Chassis} {system.Japanese}", priority++, CrossrefSearch.Provider);
+        }
+        await db.SaveChangesAsync(ct);
     }
 
     public async Task<ResearchCampaign> FindAsync(string name, CancellationToken ct) =>
@@ -102,20 +158,20 @@ public sealed class CampaignStore(ResearchDb db)
         await ReconcilePoliciesAsync(campaign.Id, policies, ct);
     }
 
-    internal async Task ReconcilePoliciesAsync(Guid campaign, IReadOnlyList<SourcePolicy> policies, CancellationToken ct)
+    internal async Task ReconcilePoliciesAsync(Guid campaign, List<SourcePolicy> policies, CancellationToken ct)
     {
-        var queue = db.Jobs.AsNoTracking().Where(j => j.Resource.CampaignId == campaign &&
+        var queue = db.Jobs.Include(j => j.Resource).Where(j => j.Resource.CampaignId == campaign &&
             (j.State == WorkState.Pending || j.State == WorkState.Blocked)).OrderBy(j => j.Id);
         for (var offset = 0; ; offset += 256)
         {
-            var page = await queue.Skip(offset).Take(256).Select(j => new { j.Id, j.State, j.Resource }).ToListAsync(ct);
-            var changes = page.GroupBy(j => PolicyRules.Permitted(policies, j.Resource) == null ? WorkState.Blocked : WorkState.Pending);
-            foreach (var group in changes)
+            var page = await queue.Skip(offset).Take(256).ToListAsync(ct);
+            foreach (var job in page)
             {
-                var ids = group.Where(j => j.State != group.Key).Select(j => j.Id).ToArray();
-                if (ids.Length > 0)
-                    await db.Jobs.Where(j => ids.Contains(j.Id)).ExecuteUpdateAsync(u => u.SetProperty(j => j.State, group.Key), ct);
+                var permitted = SourceEligibility.Assess(job.Resource, policies, db) != null;
+                if (permitted && job.State == WorkState.Blocked) { job.Attempts = 0; job.DueAt = DateTimeOffset.UtcNow; }
+                job.State = permitted ? WorkState.Pending : WorkState.Blocked;
             }
+            await db.SaveChangesAsync(ct);
             if (page.Count < 256) return;
         }
     }
